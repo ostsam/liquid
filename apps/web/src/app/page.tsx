@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GlassPane } from "@/components/GlassPane";
 import { ControlPanel } from "@/components/ControlPanel";
 import { ReplayBar } from "@/components/ReplayBar";
+import { VersionTree } from "@/components/VersionTree";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,13 @@ interface LiquidAgentState {
 
 type Phase = "empty" | "analyzing" | "sculpting";
 
+function makeSessionId() {
+  return (
+    Math.random().toString(36).slice(2, 8) +
+    Math.random().toString(36).slice(2, 6)
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function LiquidPage() {
@@ -53,17 +61,19 @@ export default function LiquidPage() {
     },
   });
 
-  // useCoAgent returns `run: agent.runAgent` as an UNBOUND prototype method.
-  // Calling run() standalone sets this=undefined and throws on this.abortController.
-  // useCopilotChatInternal exposes the actual agent instance so we can call
-  // agent.runAgent() as a proper method call (this=agent), which is how
-  // CopilotKit's own internal chat UI triggers runs.
   const { agent } = useCopilotChatInternal();
 
   const sessionIdRef = useRef<string>("");
   const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // When the user scrubs the replay bar, show the snapshot instead of live outputText
+
+  const [rootSessionId, setRootSessionId] = useState<string>("");
   const [replayText, setReplayText] = useState<string | null>(null);
+  const [showTree, setShowTree] = useState(false);
+
+  // Holds session fetched from URL — separate from CopilotKit state so we can
+  // reapply it if CopilotKit's backend sync overwrites our hydration.
+  type UrlSession = Partial<LiquidAgentState> & { rootSessionId?: string; _sid: string };
+  const [urlSession, setUrlSession] = useState<UrlSession | null>(null);
 
   // ── Derived phase ─────────────────────────────────────────────────────────
 
@@ -74,9 +84,7 @@ export default function LiquidPage() {
     : "sculpting";
 
   // ── Reactive agent trigger ────────────────────────────────────────────────
-  // Trigger the agent when entering the "analyzing" phase (new text pasted, no
-  // controls yet). The useEffect ensures React has committed the state before
-  // we hit the CopilotKit runtime.
+
   const prevPhaseRef = useRef<Phase>("empty");
   useEffect(() => {
     if (phase === "analyzing" && prevPhaseRef.current !== "analyzing") {
@@ -86,9 +94,14 @@ export default function LiquidPage() {
     prevPhaseRef.current = phase;
   }, [phase, agent]);
 
-  // ── Session management ───────────────────────────────────────────────────
+  // ── Session hydration from URL ────────────────────────────────────────────
+  // Two-effect strategy:
+  //  1. Fetch eagerly on mount — no dependency on agent readiness.
+  //  2. Apply to CopilotKit state whenever the agent is ready AND the
+  //     CopilotKit state is still empty (guards against CopilotKit's own
+  //     backend-sync overwriting an earlier hydration attempt).
 
-  // Hydrate from URL on mount
+  // Effect 1: fetch
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sid = params.get("session");
@@ -96,25 +109,36 @@ export default function LiquidPage() {
 
     fetch(`/api/session/${sid}`)
       .then((r) => r.json())
-      .then((session: Partial<LiquidAgentState>) => {
+      .then((session: Partial<LiquidAgentState> & { rootSessionId?: string }) => {
         if (session.inputText) {
-          sessionIdRef.current = sid;
-          setState({
-            inputText: session.inputText ?? "",
-            controls: session.controls ?? null,
-            activeValues: session.activeValues ?? {},
-            outputText: session.outputText ?? "",
-            sessionId: sid,
-          });
+          setUrlSession({ ...session, _sid: sid });
         }
       })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Collaboration polling: sync outputText from other users on same session
+  // Effect 2: apply once agent is ready and CopilotKit state is still empty
   useEffect(() => {
-    if (phase !== "sculpting" || !sessionIdRef.current) {
+    if (!urlSession || !agent || state.inputText) return;
+
+    const { _sid: sid, ...session } = urlSession;
+    sessionIdRef.current = sid;
+    setRootSessionId(session.rootSessionId ?? sid);
+    setState({
+      inputText: session.inputText ?? "",
+      controls: session.controls ?? null,
+      activeValues: session.activeValues ?? {},
+      outputText: session.outputText ?? "",
+      sessionId: sid,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlSession, agent, state.inputText]);
+
+  // ── Collaboration polling ─────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (phase !== "sculpting") {
       if (collaborationPollRef.current) {
         clearInterval(collaborationPollRef.current);
         collaborationPollRef.current = null;
@@ -122,10 +146,16 @@ export default function LiquidPage() {
       return;
     }
 
-    const sid = sessionIdRef.current;
+    let lastSid = "";
     let lastUpdatedAt = 0;
 
     collaborationPollRef.current = setInterval(async () => {
+      const sid = sessionIdRef.current; // read fresh every tick — never stale
+      if (!sid) return;
+      if (sid !== lastSid) {
+        lastSid = sid;
+        lastUpdatedAt = 0; // reset timestamp when session changes
+      }
       try {
         const res = await fetch(`/api/session/${sid}`);
         const remote = (await res.json()) as Partial<LiquidAgentState> & {
@@ -143,7 +173,7 @@ export default function LiquidPage() {
           }));
         }
       } catch {
-        // Ignore polling failures
+        // ignore
       }
     }, 500);
 
@@ -159,13 +189,25 @@ export default function LiquidPage() {
 
   const handlePaste = useCallback(
     async (text: string) => {
-      // Generate a short URL-safe session ID
-      const sid =
-        Math.random().toString(36).slice(2, 8) +
-        Math.random().toString(36).slice(2, 6);
-      sessionIdRef.current = sid;
+      // "New paste" button passes the current inputText back — treat as a reset
+      if (state.controls && text === state.inputText) {
+        sessionIdRef.current = "";
+        setRootSessionId("");
+        setReplayText(null);
+        setShowTree(false);
+        setUrlSession(null);
+        setState({ inputText: "", controls: null, activeValues: {}, outputText: "", sessionId: "" });
+        window.history.pushState({}, "", "/");
+        return;
+      }
 
-      // controls: null is the signal that makes the router run the analyst
+      const sid = makeSessionId();
+      sessionIdRef.current = sid;
+      setRootSessionId(sid);
+      setReplayText(null);
+      setShowTree(false);
+
+      setUrlSession(null); // new paste supersedes any URL-loaded session
       setState({
         inputText: text,
         controls: null,
@@ -174,10 +216,8 @@ export default function LiquidPage() {
         sessionId: sid,
       });
 
-      // Push session to URL (enables shareable link + hydration)
       window.history.pushState({}, "", `?session=${sid}`);
 
-      // Create session in Redis (non-blocking)
       fetch(`/api/session/${sid}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -186,25 +226,26 @@ export default function LiquidPage() {
           controls: null,
           activeValues: {},
           outputText: "",
+          rootSessionId: sid,
+          parentSessionId: null,
+          createdAt: Date.now().toString(),
         }),
       }).catch(() => {});
-
-      // Agent is triggered reactively by the phase→"analyzing" effect above
     },
     [setState]
   );
 
-  // ── Control change handler (ControlPanel manages the debounce) ────────────
+  // ── Control changes ───────────────────────────────────────────────────────
 
   const handleValuesChange = useCallback(
     (newValues: ActiveValues) => {
       setState((prev) => ({
-      inputText: prev?.inputText ?? "",
-      controls: prev?.controls ?? null,
-      activeValues: newValues,
-      outputText: prev?.outputText ?? "",
-      sessionId: prev?.sessionId ?? "",
-    }));
+        inputText: prev?.inputText ?? "",
+        controls: prev?.controls ?? null,
+        activeValues: newValues,
+        outputText: prev?.outputText ?? "",
+        sessionId: prev?.sessionId ?? "",
+      }));
     },
     [setState]
   );
@@ -214,14 +255,71 @@ export default function LiquidPage() {
     (agent as any)?.runAgent();
   }, [agent]);
 
-  // ── Reset handler ─────────────────────────────────────────────────────────
+  // ── Fork ──────────────────────────────────────────────────────────────────
 
-  const handleReset = useCallback(
-    (existingText: string) => {
-      // Re-paste the same text to force analyst re-run
-      handlePaste(existingText);
+  const handleFork = useCallback(async () => {
+    const parentSid = sessionIdRef.current;
+    const rootId = rootSessionId || parentSid;
+    const newSid = makeSessionId();
+
+    await fetch(`/api/session/${newSid}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        inputText: state.inputText,
+        controls: state.controls,
+        activeValues: state.activeValues,
+        outputText: state.outputText,
+        rootSessionId: rootId,
+        parentSessionId: parentSid,
+        createdAt: Date.now().toString(),
+      }),
+    }).catch(() => {});
+
+    sessionIdRef.current = newSid;
+    setRootSessionId(rootId);
+    setReplayText(null);
+
+    setState((prev) => ({
+      inputText: prev?.inputText ?? "",
+      controls: prev?.controls ?? null,
+      activeValues: prev?.activeValues ?? {},
+      outputText: prev?.outputText ?? "",
+      sessionId: newSid,
+    }));
+
+    window.history.pushState({}, "", `?session=${newSid}`);
+  }, [state, rootSessionId, setState]);
+
+  // ── Navigate to a session from the tree ──────────────────────────────────
+
+  const handleNavigateToSession = useCallback(
+    async (targetSessionId: string) => {
+      try {
+        const res = await fetch(`/api/session/${targetSessionId}`);
+        const session = (await res.json()) as Partial<LiquidAgentState> & {
+          rootSessionId?: string;
+        };
+        if (session.inputText) {
+          sessionIdRef.current = targetSessionId;
+          setRootSessionId(session.rootSessionId ?? targetSessionId);
+          setReplayText(null);
+          setShowTree(false); // zoom back in
+          setUrlSession(null); // navigating away from URL-loaded session
+          setState({
+            inputText: session.inputText ?? "",
+            controls: session.controls ?? null,
+            activeValues: session.activeValues ?? {},
+            outputText: session.outputText ?? "",
+            sessionId: targetSessionId,
+          });
+          window.history.pushState({}, "", `?session=${targetSessionId}`);
+        }
+      } catch {
+        // ignore
+      }
     },
-    [handlePaste]
+    [setState]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -241,17 +339,40 @@ export default function LiquidPage() {
           <span className="text-sm font-mono text-white/40 tracking-widest uppercase">
             Liquid Control
           </span>
+
           {phase === "sculpting" && sessionIdRef.current && (
-            <button
-              onClick={() => {
-                navigator.clipboard
-                  .writeText(window.location.href)
-                  .catch(() => {});
-              }}
-              className="ml-auto text-xs font-mono text-white/25 hover:text-white/50 transition-colors"
-            >
-              Copy session link
-            </button>
+            <div className="ml-auto flex items-center gap-4">
+              {/* Version tree icon */}
+              <button
+                onClick={() => setShowTree((v) => !v)}
+                title="Version tree"
+                className={[
+                  "transition-colors",
+                  showTree
+                    ? "text-violet-400"
+                    : "text-white/25 hover:text-violet-400/70",
+                ].join(" ")}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <circle cx="9" cy="2.5" r="2" stroke="currentColor" strokeWidth="1.4" />
+                  <circle cx="4" cy="13.5" r="2" stroke="currentColor" strokeWidth="1.4" />
+                  <circle cx="14" cy="13.5" r="2" stroke="currentColor" strokeWidth="1.4" />
+                  <circle cx="9" cy="9" r="2" stroke="currentColor" strokeWidth="1.4" />
+                  <line x1="9" y1="4.5" x2="9" y2="7" stroke="currentColor" strokeWidth="1.4" />
+                  <line x1="9" y1="11" x2="4" y2="11.5" stroke="currentColor" strokeWidth="1.4" />
+                  <line x1="9" y1="11" x2="14" y2="11.5" stroke="currentColor" strokeWidth="1.4" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() =>
+                  navigator.clipboard.writeText(window.location.href).catch(() => {})
+                }
+                className="text-xs font-mono text-white/25 hover:text-white/50 transition-colors"
+              >
+                copy link
+              </button>
+            </div>
           )}
         </header>
 
@@ -269,29 +390,42 @@ export default function LiquidPage() {
               : undefined
           }
         >
-          {/* Left / center: GlassPane + ReplayBar */}
+          {/* Left column: output panel ↔ version tree (same space, clean swap) */}
           <div
             className={[
               "flex flex-col gap-4",
               phase !== "sculpting" ? "w-full max-w-2xl" : "",
             ].join(" ")}
           >
-            <GlassPane
-              phase={phase}
-              inputText={state.inputText}
-              outputText={replayText ?? state.outputText}
-              onPaste={handleReset}
-            />
-            {phase === "sculpting" && sessionIdRef.current && (
-              <ReplayBar
-                sessionId={sessionIdRef.current}
-                onReplay={(snapshot) => setReplayText(snapshot)}
-                onExitReplay={() => setReplayText(null)}
+            {showTree && phase === "sculpting" ? (
+              // The output panel zooms out to become the version tree canvas
+              <VersionTree
+                rootSessionId={rootSessionId || sessionIdRef.current}
+                currentSessionId={sessionIdRef.current}
+                onNavigate={handleNavigateToSession}
+                onFork={handleFork}
+                onClose={() => setShowTree(false)}
               />
+            ) : (
+              <>
+                <GlassPane
+                  phase={phase}
+                  inputText={state.inputText}
+                  outputText={replayText ?? state.outputText}
+                  onPaste={handlePaste}
+                />
+                {phase === "sculpting" && sessionIdRef.current && (
+                  <ReplayBar
+                    sessionId={sessionIdRef.current}
+                    onReplay={(snapshot) => setReplayText(snapshot)}
+                    onExitReplay={() => setReplayText(null)}
+                  />
+                )}
+              </>
             )}
           </div>
 
-          {/* Right: ControlPanel (only in sculpting phase) */}
+          {/* Right: ControlPanel — stays visible even in tree mode */}
           {phase === "sculpting" && state.controls && (
             <div className="panel-slide-in sticky top-8">
               <ControlPanel

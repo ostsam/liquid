@@ -1,6 +1,7 @@
 /**
- * GET  /api/session/[id]  — return session state from Redis (for collaboration polling)
- * POST /api/session/[id]  — upsert session state to Redis
+ * GET    /api/session/[id]  — return session state from Redis
+ * POST   /api/session/[id]  — upsert session state to Redis
+ * DELETE /api/session/[id]  — soft-delete (marks deleted: "true")
  *
  * The web app maintains its own Redis client (same credentials, separate instance
  * from apps/agent). Do not import from apps/agent.
@@ -52,6 +53,10 @@ export async function GET(
       outputText: raw.outputText ?? "",
       sessionId: id,
       updatedAt: raw.updatedAt ?? "0",
+      createdAt: raw.createdAt ?? raw.updatedAt ?? "0",
+      rootSessionId: raw.rootSessionId ?? id,
+      parentSessionId: raw.parentSessionId ?? null,
+      deleted: raw.deleted === "true",
     });
   } catch (err) {
     console.error("[session GET]", err);
@@ -67,18 +72,41 @@ export async function POST(
     const { id } = await params;
     const body = await req.json();
 
+    const rootId: string = body.rootSessionId ?? id;
+
     await redis.hset(`lc:session:${id}`, {
       inputText: body.inputText ?? "",
       controlsJson: JSON.stringify(body.controls ?? null),
       activeValuesJson: JSON.stringify(body.activeValues ?? {}),
       outputText: body.outputText ?? "",
       updatedAt: Date.now().toString(),
+      createdAt: body.createdAt ?? Date.now().toString(),
+      rootSessionId: rootId,
+      parentSessionId: body.parentSessionId ?? "",
     });
     await redis.expire(`lc:session:${id}`, TTL);
+
+    // Register in the tree set so /api/tree/[rootId] can enumerate all sessions
+    await redis.sadd(`lc:tree:${rootId}:sessions`, id);
+    await redis.expire(`lc:tree:${rootId}:sessions`, TTL);
 
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("[session POST]", err);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    await redis.hset(`lc:session:${id}`, { deleted: "true" });
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("[session DELETE]", err);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
