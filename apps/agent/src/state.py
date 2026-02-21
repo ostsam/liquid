@@ -14,3 +14,4 @@ class AgentState(CopilotKitState):
     activeValues: dict           # { [controlId]: number | boolean }
     outputText: str
     sessionId: str
+    skipRewrite: Optional[bool]  # True when navigating to a historical session — suppresses rewriter

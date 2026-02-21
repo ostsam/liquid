@@ -97,6 +97,33 @@ export async function POST(
   }
 }
 
+/**
+ * PATCH /api/session/[id]
+ *
+ * Updates only outputText + updatedAt. All other fields (parentSessionId,
+ * rootSessionId, controlsJson, etc.) are preserved via Redis hash field-level write.
+ * Used by the frontend to reliably persist the final streamed outputText with the
+ * correct sessionId — bypassing any sessionId timing ambiguity in the Python agent.
+ */
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const { outputText } = await req.json();
+    await redis.hset(`lc:session:${id}`, {
+      outputText: outputText ?? "",
+      updatedAt: Date.now().toString(),
+    });
+    await redis.expire(`lc:session:${id}`, TTL);
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("[session PATCH]", err);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
