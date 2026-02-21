@@ -251,9 +251,38 @@ export default function LiquidPage() {
   );
 
   const handleTriggerAgent = useCallback(() => {
+    // Each user-triggered rewrite automatically becomes a new child version.
+    // Advance sessionId BEFORE calling runAgent() so the rewriter writes
+    // its output directly into the new child session, not the parent.
+    const parentSid = sessionIdRef.current;
+    if (parentSid) {
+      const rootId = rootSessionId || parentSid;
+      const childSid = makeSessionId();
+
+      sessionIdRef.current = childSid;
+      setUrlSession(null);
+
+      fetch(`/api/session/${childSid}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inputText: state.inputText,
+          controls: state.controls,
+          activeValues: state.activeValues,
+          outputText: "",
+          rootSessionId: rootId,
+          parentSessionId: parentSid,
+          createdAt: Date.now().toString(),
+        }),
+      }).catch(() => {});
+
+      setState((prev) => ({ ...prev, sessionId: childSid } as LiquidAgentState));
+      window.history.replaceState({}, "", `?session=${childSid}`);
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (agent as any)?.runAgent();
-  }, [agent]);
+  }, [agent, rootSessionId, state.inputText, state.controls, state.activeValues, setState]);
 
   // ── Fork ──────────────────────────────────────────────────────────────────
 
@@ -279,6 +308,7 @@ export default function LiquidPage() {
     sessionIdRef.current = newSid;
     setRootSessionId(rootId);
     setReplayText(null);
+    setUrlSession(null);
 
     setState((prev) => ({
       inputText: prev?.inputText ?? "",
