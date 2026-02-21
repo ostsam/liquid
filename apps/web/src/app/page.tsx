@@ -36,6 +36,7 @@ interface LiquidAgentState {
   activeValues: ActiveValues;
   outputText: string;
   sessionId: string;
+  skipRewrite?: boolean;
 }
 
 type Phase = "empty" | "analyzing" | "sculpting";
@@ -58,6 +59,7 @@ export default function LiquidPage() {
       activeValues: {},
       outputText: "",
       sessionId: "",
+      skipRewrite: false,
     },
   });
 
@@ -65,6 +67,7 @@ export default function LiquidPage() {
 
   const sessionIdRef = useRef<string>("");
   const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const outputPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [rootSessionId, setRootSessionId] = useState<string>("");
   const [replayText, setReplayText] = useState<string | null>(null);
@@ -141,6 +144,7 @@ export default function LiquidPage() {
       activeValues: session.activeValues ?? {},
       outputText: session.outputText ?? "",
       sessionId: sid,
+      skipRewrite: true, // don't re-run rewriter when restoring from URL
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlSession, agent, state.inputText]);
@@ -195,6 +199,30 @@ export default function LiquidPage() {
     };
   }, [phase, setState]);
 
+  // ── Frontend output persistence ───────────────────────────────────────────
+  // The Python agent may receive a stale sessionId (if React batches the setState
+  // before runAgent reads the updated state), so it can write outputText to the
+  // wrong session. This effect is the authoritative write: it runs on the frontend
+  // where sessionIdRef.current is always correct, 1s after outputText stabilises
+  // (i.e. streaming has finished). Skipped when skipRewrite=true (navigation view).
+
+  useEffect(() => {
+    if (!state.outputText || !sessionIdRef.current) return;
+    if (state.skipRewrite) return; // viewing a historical version — don't overwrite
+
+    const sid = sessionIdRef.current; // capture now, before any async gap
+    const text = state.outputText;    // capture now
+
+    if (outputPersistTimerRef.current) clearTimeout(outputPersistTimerRef.current);
+    outputPersistTimerRef.current = setTimeout(() => {
+      fetch(`/api/session/${sid}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outputText: text }),
+      }).catch(() => {});
+    }, 1000);
+  }, [state.outputText, state.skipRewrite]);
+
   // ── Paste handler ─────────────────────────────────────────────────────────
 
   const handlePaste = useCallback(
@@ -206,7 +234,7 @@ export default function LiquidPage() {
         setReplayText(null);
         setShowTree(false);
         setUrlSession(null);
-        setState({ inputText: "", controls: null, activeValues: {}, outputText: "", sessionId: "" });
+        setState({ inputText: "", controls: null, activeValues: {}, outputText: "", sessionId: "", skipRewrite: false });
         window.history.pushState({}, "", "/");
         return;
       }
@@ -224,6 +252,7 @@ export default function LiquidPage() {
         activeValues: {},
         outputText: "",
         sessionId: sid,
+        skipRewrite: false,
       });
 
       window.history.pushState({}, "", `?session=${sid}`);
@@ -286,7 +315,7 @@ export default function LiquidPage() {
         }),
       }).catch(() => {});
 
-      setState((prev) => ({ ...prev, sessionId: childSid } as LiquidAgentState));
+      setState((prev) => ({ ...prev, sessionId: childSid, skipRewrite: false } as LiquidAgentState));
       window.history.replaceState({}, "", `?session=${childSid}`);
     }
 
@@ -326,6 +355,7 @@ export default function LiquidPage() {
       activeValues: prev?.activeValues ?? {},
       outputText: prev?.outputText ?? "",
       sessionId: newSid,
+      skipRewrite: false,
     }));
 
     window.history.pushState({}, "", `?session=${newSid}`);
@@ -353,6 +383,7 @@ export default function LiquidPage() {
             activeValues: session.activeValues ?? {},
             outputText: session.outputText ?? "",
             sessionId: targetSessionId,
+            skipRewrite: true, // display historical text without triggering rewriter
           });
           window.history.pushState({}, "", `?session=${targetSessionId}`);
         }

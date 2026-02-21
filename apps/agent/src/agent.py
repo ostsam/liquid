@@ -28,7 +28,7 @@ def router(state: AgentState) -> str:
 
     if has_input and not has_controls:
         return "analyst_node"
-    if has_controls and has_values:
+    if has_controls and has_values and not state.get("skipRewrite"):
         return "rewriter_node"
     return END
 

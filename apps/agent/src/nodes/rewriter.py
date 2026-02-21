@@ -104,12 +104,15 @@ async def rewriter_node(state: AgentState, config: RunnableConfig) -> dict:
     # Step 3: Cache result (non-blocking)
     asyncio.create_task(set_rewrite(input_text, active_values, output_text))
 
-    # Step 4: Append to sculpting history stream (non-blocking)
+    # Step 4: Persist output to Redis and append to sculpting history stream.
+    # update_session is awaited directly (not via create_task) so the outputText
+    # is guaranteed to be in Redis before this node returns — navigation to this
+    # historical session will always find the correct text.
     session_id = state.get("sessionId", "")
     if session_id:
         changed_id = next(iter(active_values), "unknown")
         changed_val = str(active_values.get(changed_id, ""))
+        await update_session(session_id, {**dict(state), "outputText": output_text})
         asyncio.create_task(append_event(session_id, changed_id, changed_val, output_text))
-        asyncio.create_task(update_session(session_id, {**dict(state), "outputText": output_text}))
 
     return {"outputText": output_text}
