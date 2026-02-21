@@ -17,7 +17,7 @@ add_langgraph_fastapi_endpoint(
     app=app,
     agent=LangGraphAGUIAgent(
         name="liquidAgent",
-        description="Liquid Control: generates bespoke controls for any pasted text and rewrites it according to user-controlled parameters.",
+        description="Liquid: generates bespoke controls for any pasted text and rewrites it according to user-controlled parameters.",
         graph=graph,
     ),
     path="/",

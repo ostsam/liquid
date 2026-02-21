@@ -4,7 +4,7 @@ from copilotkit import CopilotKitState
 
 class AgentState(CopilotKitState):
     """
-    Liquid Control agent state.
+    Liquid agent state.
 
     Extends CopilotKitState (which includes messages + copilotkit fields)
     with the four domain-specific fields driven entirely by frontend controls.

@@ -378,7 +378,7 @@ export default function LiquidPage() {
         <header className="px-8 py-6 flex items-center gap-3">
           <div className="w-2 h-2 rounded-full bg-violet-400" />
           <span className="text-sm font-mono text-white/40 tracking-widest uppercase">
-            Liquid Control
+            Liquid
           </span>
 
           {phase === "sculpting" && sessionIdRef.current && (

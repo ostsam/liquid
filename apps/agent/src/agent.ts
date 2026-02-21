@@ -1,5 +1,5 @@
 /**
- * Liquid Control — LangGraph Agent
+ * Liquid — LangGraph Agent
  *
  * Two-node graph with conditional routing:
  *

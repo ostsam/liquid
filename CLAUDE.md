@@ -4,7 +4,7 @@
 
 **"The AI shouldn't just generate the answer; it should generate the controls to manipulate that answer."**
 
-Liquid Control is a Just-In-Time interface engine. The user pastes any content — an email, a code snippet, a tweet — and Claude analyzes the *latent variables* of that specific text, then materializes bespoke controls (sliders, dials, toggles) tuned to that exact content. The interface is not pre-built; it is hallucinated on-demand by the model for single-use purposes.
+Liquid is a Just-In-Time interface engine. The user pastes any content — an email, a code snippet, a tweet — and Claude analyzes the *latent variables* of that specific text, then materializes bespoke controls (sliders, dials, toggles) tuned to that exact content. The interface is not pre-built; it is hallucinated on-demand by the model for single-use purposes.
 
 This is not a chatbot. This is a generative cockpit.
 

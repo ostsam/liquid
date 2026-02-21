@@ -4,7 +4,7 @@ import { CopilotKit } from "@copilotkit/react-core";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Liquid Control",
+  title: "Liquid",
   description: "Just-In-Time interface engine — the AI generates the controls to manipulate the answer.",
 };
 
