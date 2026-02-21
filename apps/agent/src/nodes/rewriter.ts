@@ -10,6 +10,7 @@
 import { RunnableConfig } from "@langchain/core/runnables";
 import { ChatAnthropic } from "@langchain/anthropic";
 import { HumanMessage } from "@langchain/core/messages";
+import { copilotkitEmitState } from "@copilotkit/sdk-js/langgraph";
 import type { AgentState } from "../state";
 import type { ControlSchema, ActiveValues } from "../types";
 import { getRewrite, setRewrite } from "../redis/timemachine";
@@ -113,12 +114,22 @@ export async function rewriterNode(
 		// Fall through to live call
 	}
 
-	// Step 2: Call Claude
-	const outputText = await callRewriter(
-		state.inputText,
-		state.controls,
-		state.activeValues,
-	);
+	// Step 2: Stream from Claude, emitting partial outputText on each chunk
+	const model = new ChatAnthropic({ model: "claude-haiku-4-5", temperature: 0.7 });
+	const prompt = buildPrompt(state.inputText, state.controls, state.activeValues);
+	const stream = await model.stream([new HumanMessage(prompt)]);
+
+	let outputText = "";
+	for await (const chunk of stream) {
+		const delta =
+			typeof chunk.content === "string"
+				? chunk.content
+				: (chunk.content as Array<{ text?: string }>)
+						.map((b) => b.text ?? "")
+						.join("");
+		outputText += delta;
+		await copilotkitEmitState(config, { ...state, outputText });
+	}
 
 	// Step 3: Cache result (non-blocking)
 	void setRewrite(state.inputText, state.activeValues, outputText);

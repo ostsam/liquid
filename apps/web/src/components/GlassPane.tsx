@@ -11,20 +11,19 @@ interface GlassPaneProps {
 
 export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPaneProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Track previous outputText to trigger fade transition
-  const [displayText, setDisplayText] = useState(outputText);
-  const [fading, setFading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const streamingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Show cursor while outputText is actively changing; hide it 800ms after the last update
   useEffect(() => {
-    if (outputText !== displayText) {
-      setFading(true);
-      const t = setTimeout(() => {
-        setDisplayText(outputText);
-        setFading(false);
-      }, 150);
-      return () => clearTimeout(t);
-    }
-  }, [outputText, displayText]);
+    if (!outputText) return;
+    setIsStreaming(true);
+    if (streamingTimeoutRef.current) clearTimeout(streamingTimeoutRef.current);
+    streamingTimeoutRef.current = setTimeout(() => setIsStreaming(false), 800);
+    return () => {
+      if (streamingTimeoutRef.current) clearTimeout(streamingTimeoutRef.current);
+    };
+  }, [outputText]);
 
   // ── Empty state: paste prompt ──────────────────────────────────────────────
   if (phase === "empty") {
@@ -101,7 +100,7 @@ export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPanePr
         <span className="text-xs font-mono text-white/30 uppercase tracking-widest">
           Output
         </span>
-        {!displayText && (
+        {!outputText && (
           <span className="inline-flex gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce [animation-delay:0ms]" />
             <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce [animation-delay:150ms]" />
@@ -109,13 +108,15 @@ export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPanePr
           </span>
         )}
       </div>
-      <div
-        className={[
-          "flex-1 px-5 py-5 text-white/85 text-sm leading-relaxed font-mono overflow-auto whitespace-pre-wrap transition-opacity duration-150",
-          fading ? "opacity-0" : "opacity-100",
-        ].join(" ")}
-      >
-        {displayText || (
+      <div className="flex-1 px-5 py-5 text-white/85 text-sm leading-relaxed font-mono overflow-auto whitespace-pre-wrap">
+        {outputText ? (
+          <>
+            {outputText}
+            {isStreaming && (
+              <span className="inline-block w-[2px] h-[1em] bg-violet-400 ml-px align-text-bottom animate-pulse" />
+            )}
+          </>
+        ) : (
           <span className="text-white/25 italic">Rewriting…</span>
         )}
       </div>
