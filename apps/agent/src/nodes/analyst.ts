@@ -20,6 +20,7 @@ import {
 } from "../types";
 import { findSimilarSchema, storeSchema } from "../redis/semantic";
 import { warmCache } from "../redis/timemachine";
+import { updateSession } from "../redis/session";
 import { callRewriter } from "./rewriter";
 
 const ANALYST_SYSTEM_PROMPT = `You are a latent variable extractor. Your job is to decompose the provided text into its hidden control dimensions — the underlying axes of variation that, if altered, would meaningfully transform the text.
@@ -149,5 +150,11 @@ export async function analystNode(
 	).catch(() => {});
 
 	const activeValues = buildDefaultActiveValues(controls);
+
+	// Persist controls + activeValues so page refresh can restore the full cockpit
+	if (state.sessionId) {
+		void updateSession(state.sessionId, { ...state, controls, activeValues });
+	}
+
 	return { controls, activeValues };
 }
