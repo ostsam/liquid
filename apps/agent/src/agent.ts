@@ -45,7 +45,7 @@ const workflow = new StateGraph(AgentStateAnnotation)
     rewriter_node: "rewriter_node",
     [END]: END,
   })
-  .addEdge("analyst_node", END)
+  .addEdge("analyst_node", "rewriter_node")
   .addEdge("rewriter_node", END);
 
 const memory = new MemorySaver();

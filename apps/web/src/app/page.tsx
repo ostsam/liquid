@@ -82,10 +82,6 @@ export default function LiquidPage() {
     if (phase === "analyzing" && prevPhaseRef.current !== "analyzing") {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (agent as any)?.runAgent();
-    } else if (phase === "sculpting" && prevPhaseRef.current === "analyzing") {
-      // Analyst just finished — fire the initial rewrite with default values.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (agent as any)?.runAgent();
     }
     prevPhaseRef.current = phase;
   }, [phase, agent]);
