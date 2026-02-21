@@ -1,7 +1,7 @@
 import {
-  CopilotRuntime,
-  ExperimentalEmptyAdapter,
-  copilotRuntimeNextJSAppRouterEndpoint,
+	CopilotRuntime,
+	ExperimentalEmptyAdapter,
+	copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
 import { LangGraphAgent } from "@copilotkit/runtime/langgraph";
 import { NextRequest } from "next/server";
@@ -13,22 +13,23 @@ const serviceAdapter = new ExperimentalEmptyAdapter();
 // 2. Create the CopilotRuntime instance and utilize the LangGraph AG-UI
 //    integration to setup the connection.
 const runtime = new CopilotRuntime({
-  agents: {
-    starterAgent: new LangGraphAgent({
-      deploymentUrl: process.env.LANGGRAPH_DEPLOYMENT_URL || "http://localhost:8123",
-      graphId: "starterAgent",
-      langsmithApiKey: process.env.LANGSMITH_API_KEY || "",
-    })
-  }
+	agents: {
+		liquidAgent: new LangGraphAgent({
+			deploymentUrl:
+				process.env.LANGGRAPH_DEPLOYMENT_URL || "http://localhost:8123",
+			graphId: "liquidAgent",
+			langsmithApiKey: process.env.LANGSMITH_API_KEY || "",
+		}),
+	},
 });
 
 // 3. Build a Next.js API route that handles the CopilotKit runtime requests.
 export const POST = async (req: NextRequest) => {
-  const { handleRequest } = copilotRuntimeNextJSAppRouterEndpoint({
-    runtime,
-    serviceAdapter,
-    endpoint: "/api/copilotkit",
-  });
+	const { handleRequest } = copilotRuntimeNextJSAppRouterEndpoint({
+		runtime,
+		serviceAdapter,
+		endpoint: "/api/copilotkit",
+	});
 
-  return handleRequest(req);
+	return handleRequest(req);
 };
