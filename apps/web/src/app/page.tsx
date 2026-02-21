@@ -68,6 +68,8 @@ export default function LiquidPage() {
   const sessionIdRef = useRef<string>("");
   const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const outputPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // True while the local agent is actively generating — suppresses collaboration polling
+  const isGeneratingRef = useRef<boolean>(false);
 
   const [rootSessionId, setRootSessionId] = useState<string>("");
   const [replayText, setReplayText] = useState<string | null>(null);
@@ -176,7 +178,7 @@ export default function LiquidPage() {
           updatedAt?: string;
         };
         const remoteTs = Number(remote.updatedAt ?? 0);
-        if (remoteTs > lastUpdatedAt && remote.outputText) {
+        if (!isGeneratingRef.current && remoteTs > lastUpdatedAt && remote.outputText) {
           lastUpdatedAt = remoteTs;
           setState((prev) => ({
             inputText: prev?.inputText ?? "",
@@ -215,6 +217,7 @@ export default function LiquidPage() {
 
     if (outputPersistTimerRef.current) clearTimeout(outputPersistTimerRef.current);
     outputPersistTimerRef.current = setTimeout(() => {
+      isGeneratingRef.current = false;
       fetch(`/api/session/${sid}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -319,6 +322,7 @@ export default function LiquidPage() {
       window.history.replaceState({}, "", `?session=${childSid}`);
     }
 
+    isGeneratingRef.current = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (agent as any)?.runAgent();
   }, [agent, rootSessionId, state.inputText, state.controls, state.activeValues, setState]);
