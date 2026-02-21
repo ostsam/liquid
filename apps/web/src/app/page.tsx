@@ -70,6 +70,16 @@ export default function LiquidPage() {
   const [replayText, setReplayText] = useState<string | null>(null);
   const [showTree, setShowTree] = useState(false);
 
+  // Pre-fetched tree data — populated on button hover so it's ready before mount
+  const [prefetchedSessions, setPrefetchedSessions] = useState<unknown[] | null>(null);
+  const prefetchingRef = useRef(false);
+
+  // Invalidate pre-fetched data whenever the active session changes (new rewrite = new node in tree)
+  useEffect(() => {
+    setPrefetchedSessions(null);
+    prefetchingRef.current = false;
+  }, [state.sessionId]);
+
   // Holds session fetched from URL — separate from CopilotKit state so we can
   // reapply it if CopilotKit's backend sync overwrites our hydration.
   type UrlSession = Partial<LiquidAgentState> & { rootSessionId?: string; _sid: string };
@@ -324,12 +334,13 @@ export default function LiquidPage() {
   // ── Navigate to a session from the tree ──────────────────────────────────
 
   const handleNavigateToSession = useCallback(
-    async (targetSessionId: string) => {
+    async (targetSessionId: string, cachedSession?: unknown) => {
       try {
-        const res = await fetch(`/api/session/${targetSessionId}`);
-        const session = (await res.json()) as Partial<LiquidAgentState> & {
-          rootSessionId?: string;
-        };
+        const session = cachedSession
+          ? (cachedSession as Partial<LiquidAgentState> & { rootSessionId?: string })
+          : ((await fetch(`/api/session/${targetSessionId}`).then((r) =>
+              r.json()
+            )) as Partial<LiquidAgentState> & { rootSessionId?: string });
         if (session.inputText) {
           sessionIdRef.current = targetSessionId;
           setRootSessionId(session.rootSessionId ?? targetSessionId);
@@ -375,6 +386,15 @@ export default function LiquidPage() {
               {/* Version tree icon */}
               <button
                 onClick={() => setShowTree((v) => !v)}
+                onMouseEnter={() => {
+                  const rootId = rootSessionId || sessionIdRef.current;
+                  if (!rootId || prefetchingRef.current || prefetchedSessions) return;
+                  prefetchingRef.current = true;
+                  fetch(`/api/tree/${rootId}`)
+                    .then((r) => r.json())
+                    .then((data) => setPrefetchedSessions(data))
+                    .catch(() => { prefetchingRef.current = false; });
+                }}
                 title="Version tree"
                 className={[
                   "transition-colors",
@@ -431,10 +451,11 @@ export default function LiquidPage() {
               // The output panel zooms out to become the version tree canvas
               <VersionTree
                 rootSessionId={rootSessionId || sessionIdRef.current}
-                currentSessionId={sessionIdRef.current}
+                currentSessionId={state.sessionId}
                 onNavigate={handleNavigateToSession}
                 onFork={handleFork}
                 onClose={() => setShowTree(false)}
+                initialSessions={prefetchedSessions}
               />
             ) : (
               <>

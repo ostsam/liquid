@@ -45,46 +45,48 @@ export async function GET(
       return NextResponse.json([]);
     }
 
-    // Fetch all sessions in parallel
-    const sessions = await Promise.all(
-      sessionIds.map(async (sid) => {
-        try {
-          const raw = await redis.hgetall<Record<string, unknown>>(
-            `lc:session:${sid}`
-          );
-          if (!raw) return null;
+    // Fetch all sessions in a single pipelined request instead of N parallel HTTP calls
+    const pipeline = redis.pipeline();
+    for (const sid of sessionIds) {
+      pipeline.hgetall(`lc:session:${sid}`);
+    }
+    const rawResults = await pipeline.exec() as (Record<string, unknown> | null)[];
 
-          // Parse controls to extract scalar/toggle labels for the preview
-          const controls = raw.controlsJson
-            ? safeParseJson<{ scalars?: { label: string }[] } | null>(
-                raw.controlsJson,
-                null
-              )
-            : null;
+    const sessions = sessionIds.map((sid, i) => {
+      try {
+        const raw = rawResults[i];
+        if (!raw) return null;
 
-          const controlLabels = controls?.scalars
-            ? controls.scalars.map((s) => s.label).join(", ")
-            : null;
+        const controls = raw.controlsJson
+          ? safeParseJson<{ scalars?: { label: string }[] } | null>(
+              raw.controlsJson,
+              null
+            )
+          : null;
 
-          return {
-            sessionId: sid,
-            outputText: raw.outputText ?? "",
-            inputText: raw.inputText ?? "",
-            controlLabels,
-            createdAt: raw.createdAt ?? raw.updatedAt ?? "0",
-            updatedAt: raw.updatedAt ?? "0",
-            parentSessionId:
-              raw.parentSessionId && raw.parentSessionId !== ""
-                ? raw.parentSessionId
-                : null,
-            rootSessionId: raw.rootSessionId ?? rootId,
-            deleted: raw.deleted === "true",
-          };
-        } catch {
-          return null;
-        }
-      })
-    );
+        const controlLabels = controls?.scalars
+          ? controls.scalars.map((s) => s.label).join(", ")
+          : null;
+
+        return {
+          sessionId: sid,
+          // Truncate to what the node preview actually renders — avoids sending kilobytes per node
+          outputText: String(raw.outputText ?? "").slice(0, 200),
+          inputText: String(raw.inputText ?? "").slice(0, 200),
+          controlLabels,
+          createdAt: raw.createdAt ?? raw.updatedAt ?? "0",
+          updatedAt: raw.updatedAt ?? "0",
+          parentSessionId:
+            raw.parentSessionId && raw.parentSessionId !== ""
+              ? raw.parentSessionId
+              : null,
+          rootSessionId: raw.rootSessionId ?? rootId,
+          deleted: raw.deleted === "true" || raw.deleted === true,
+        };
+      } catch {
+        return null;
+      }
+    });
 
     return NextResponse.json(sessions.filter(Boolean));
   } catch (err) {

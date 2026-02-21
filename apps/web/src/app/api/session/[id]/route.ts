@@ -56,7 +56,7 @@ export async function GET(
       createdAt: raw.createdAt ?? raw.updatedAt ?? "0",
       rootSessionId: raw.rootSessionId ?? id,
       parentSessionId: raw.parentSessionId ?? null,
-      deleted: raw.deleted === "true",
+      deleted: raw.deleted === "true" || raw.deleted === true,
     });
   } catch (err) {
     console.error("[session GET]", err);
@@ -103,8 +103,53 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    await redis.hset(`lc:session:${id}`, { deleted: "true" });
-    return NextResponse.json({ ok: true });
+
+    // Look up rootSessionId so we can walk the full tree
+    const sessionData = await redis.hgetall<Record<string, string>>(`lc:session:${id}`);
+    const rootId = sessionData?.rootSessionId ?? id;
+
+    // Fetch every session ID registered in this tree (null-safe: smembers returns null for missing keys)
+    const allIds = (await redis.smembers<string[]>(`lc:tree:${rootId}:sessions`)) ?? [id];
+
+    // Resolve parentSessionId for every session in one pipeline round-trip
+    const parentPipeline = redis.pipeline();
+    for (const sid of allIds) {
+      parentPipeline.hget(`lc:session:${sid}`, "parentSessionId");
+    }
+    const parentResults = await parentPipeline.exec() as (string | null)[];
+
+    // Build child-map: parentId → [childId, ...]
+    const childMap = new Map<string, string[]>();
+    allIds.forEach((sid, i) => {
+      const parentId = parentResults[i];
+      if (parentId) {
+        const siblings = childMap.get(parentId) ?? [];
+        siblings.push(sid);
+        childMap.set(parentId, siblings);
+      }
+    });
+
+    // BFS from the target node to collect it and all its descendants
+    const toDelete = new Set<string>([id]);
+    const queue = [id];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const child of childMap.get(current) ?? []) {
+        if (!toDelete.has(child)) {
+          toDelete.add(child);
+          queue.push(child);
+        }
+      }
+    }
+
+    // Soft-delete everything in a single pipeline
+    const deletePipeline = redis.pipeline();
+    for (const sid of toDelete) {
+      deletePipeline.hset(`lc:session:${sid}`, { deleted: "true" });
+    }
+    await deletePipeline.exec();
+
+    return NextResponse.json({ ok: true, deleted: toDelete.size });
   } catch (err) {
     console.error("[session DELETE]", err);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
