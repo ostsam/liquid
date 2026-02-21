@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useCallback, useState } from "react";
+import { useEffect, useCallback, useState, useRef } from "react";
 import {
   ReactFlow,
   Background,
@@ -9,6 +9,7 @@ import {
   Position,
   Node,
   Edge,
+  NodeChange,
   useNodesState,
   useEdgesState,
   NodeProps,
@@ -37,6 +38,7 @@ type SessionNodeData = {
   isActive: boolean;
   onNavigate: (id: string) => void;
   onDelete: (id: string) => void;
+  onPreload: (id: string) => void;
   [key: string]: unknown;
 };
 
@@ -128,7 +130,7 @@ function SessionNodeComponent({ data }: NodeProps) {
           ? "border-white/25 shadow-[0_2px_12px_rgba(0,0,0,0.4)]"
           : "border-white/10",
       ].join(" ")}
-      onMouseEnter={() => setHovered(true)}
+      onMouseEnter={() => { setHovered(true); d.onPreload(d.sessionId); }}
       onMouseLeave={() => setHovered(false)}
       onClick={() => d.onNavigate(d.sessionId)}
     >
@@ -158,7 +160,10 @@ function SessionNodeComponent({ data }: NodeProps) {
         )}
         <button
           style={{ opacity: hovered ? 1 : 0 }}
-          className="text-white/15 hover:text-red-400/70 font-mono text-sm leading-none transition-all"
+          // nodrag + nopan: React Flow fires drag-detection on mousedown, before click.
+          // Without these classes the mousedown is consumed by React Flow and the click never lands.
+          className="nodrag nopan text-white/15 hover:text-red-400/70 font-mono text-sm leading-none transition-all"
+          onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             d.onDelete(d.sessionId);
@@ -210,9 +215,11 @@ const nodeTypes: NodeTypes = {
 interface VersionTreeProps {
   rootSessionId: string;
   currentSessionId: string;
-  onNavigate: (sessionId: string) => void;
+  onNavigate: (sessionId: string, cachedSession?: unknown) => void;
   onFork: () => void;
   onClose: () => void;
+  /** Pre-fetched sessions from parent — skips the loading state entirely when provided */
+  initialSessions?: unknown[] | null;
 }
 
 export function VersionTree({
@@ -221,16 +228,119 @@ export function VersionTree({
   onNavigate,
   onFork,
   onClose,
+  initialSessions,
 }: VersionTreeProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [loading, setLoading] = useState(true);
+  // Skip loading state when pre-fetched data is already available
+  const [loading, setLoading] = useState(() => !initialSessions?.length);
   const [nodeCount, setNodeCount] = useState(0);
+  // Silent refresh: re-fetches tree after delete without showing the loading spinner
+  const [silentRefreshing, setSilentRefreshing] = useState(false);
+
+  // Full session cache — populated on node hover so clicks are instant
+  const sessionCacheRef = useRef<Map<string, unknown>>(new Map());
+
+  // Snapshot of current edges for BFS inside handleDelete (avoids adding `edges` as dep)
+  const edgesRef = useRef<Edge[]>([]);
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
+
+  // Fetch full session data on hover; no-op if already cached
+  const handlePreload = useCallback((sessionId: string) => {
+    if (sessionCacheRef.current.has(sessionId)) return;
+    fetch(`/api/session/${sessionId}`)
+      .then((r) => r.json())
+      .then((data) => sessionCacheRef.current.set(sessionId, data))
+      .catch(() => {});
+  }, []);
+
+  // Navigate wrapper — injects cached session so the caller can skip its own fetch
+  const handleNavigate = useCallback(
+    (sessionId: string) => onNavigate(sessionId, sessionCacheRef.current.get(sessionId)),
+    [onNavigate]
+  );
+
+  // Persisted drag positions — survives component unmount and page reload
+  const savedPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+
+  // Load saved positions from localStorage when rootSessionId is known
+  useEffect(() => {
+    if (!rootSessionId) return;
+    try {
+      const raw = localStorage.getItem(`lc:tree-positions:${rootSessionId}`);
+      if (raw) {
+        const obj = JSON.parse(raw) as Record<string, { x: number; y: number }>;
+        savedPositionsRef.current = new Map(Object.entries(obj));
+      }
+    } catch {
+      // ignore
+    }
+  }, [rootSessionId]);
+
+  // Consume pre-fetched sessions immediately — bypasses the fetch effect entirely
+  useEffect(() => {
+    if (!initialSessions?.length) return;
+    buildGraph(initialSessions as SessionFlat[]);
+    setLoading(false);
+  // buildGraph identity is stable; we only want this when initialSessions reference changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSessions]);
+
+  // Intercept node changes — persist final drag positions to localStorage
+  const handleNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      let changed = false;
+      for (const change of changes) {
+        if (change.type === "position" && change.position && !change.dragging) {
+          savedPositionsRef.current.set(change.id, change.position);
+          changed = true;
+        }
+      }
+      if (changed && rootSessionId) {
+        try {
+          localStorage.setItem(
+            `lc:tree-positions:${rootSessionId}`,
+            JSON.stringify(Object.fromEntries(savedPositionsRef.current))
+          );
+        } catch {
+          // ignore
+        }
+      }
+      onNodesChange(changes);
+    },
+    [onNodesChange, rootSessionId]
+  );
 
   const handleDelete = useCallback(async (sessionId: string) => {
-    await fetch(`/api/session/${sessionId}`, { method: "DELETE" });
-    setLoading(true); // trigger re-fetch
-  }, []);
+    // Build child map from the current edge snapshot for cascade removal
+    const childMap = new Map<string, string[]>();
+    for (const edge of edgesRef.current) {
+      const children = childMap.get(edge.source) ?? [];
+      children.push(edge.target);
+      childMap.set(edge.source, children);
+    }
+    // BFS: collect the target node and all its descendants
+    const toRemove = new Set<string>([sessionId]);
+    const queue = [sessionId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const child of childMap.get(current) ?? []) {
+        if (!toRemove.has(child)) {
+          toRemove.add(child);
+          queue.push(child);
+        }
+      }
+    }
+    // Optimistically remove from the canvas — instant feedback
+    setNodes((prev) => prev.filter((n) => !toRemove.has(n.id)));
+    setEdges((prev) =>
+      prev.filter((e) => !toRemove.has(e.source) && !toRemove.has(e.target))
+    );
+    setNodeCount((prev) => Math.max(0, prev - toRemove.size));
+    // Fire the API call, then silently confirm (no loading spinner)
+    const res = await fetch(`/api/session/${sessionId}`, { method: "DELETE" });
+    if (res.ok) setSilentRefreshing(true);
+  }, [setNodes, setEdges, setSilentRefreshing]);
 
   const buildGraph = useCallback(
     (sessions: SessionFlat[]) => {
@@ -241,7 +351,9 @@ export function VersionTree({
       const newNodes: Node[] = active.map((s) => ({
         id: s.sessionId,
         type: "sessionNode",
-        position: positions.get(s.sessionId) ?? { x: 0, y: 0 },
+        position:
+          savedPositionsRef.current.get(s.sessionId) ??
+          positions.get(s.sessionId) ?? { x: 0, y: 0 },
         data: {
           sessionId: s.sessionId,
           outputText: s.outputText,
@@ -249,8 +361,9 @@ export function VersionTree({
           controlLabels: s.controlLabels,
           createdAt: s.createdAt,
           isActive: s.sessionId === currentSessionId,
-          onNavigate,
+          onNavigate: handleNavigate,
           onDelete: handleDelete,
+          onPreload: handlePreload,
         } satisfies SessionNodeData,
       }));
 
@@ -271,7 +384,7 @@ export function VersionTree({
       setNodes(newNodes);
       setEdges(newEdges);
     },
-    [currentSessionId, onNavigate, handleDelete, setNodes, setEdges]
+    [currentSessionId, handleNavigate, handleDelete, handlePreload, setNodes, setEdges]
   );
 
   // Fetch tree whenever loading is true
@@ -296,6 +409,24 @@ export function VersionTree({
     };
   }, [rootSessionId, loading, buildGraph]);
 
+  // Silently confirm tree state after a delete — no loading spinner
+  useEffect(() => {
+    if (!silentRefreshing || !rootSessionId) return;
+    let cancelled = false;
+    fetch(`/api/tree/${rootSessionId}`)
+      .then((r) => r.json())
+      .then((sessions: SessionFlat[]) => {
+        if (!cancelled) {
+          buildGraph(sessions);
+          setSilentRefreshing(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSilentRefreshing(false);
+      });
+    return () => { cancelled = true; };
+  }, [silentRefreshing, rootSessionId, buildGraph]);
+
   // Keep active-node highlight in sync without full re-fetch
   useEffect(() => {
     setNodes((prev) =>
@@ -304,12 +435,13 @@ export function VersionTree({
         data: {
           ...n.data,
           isActive: n.id === currentSessionId,
-          onNavigate,
+          onNavigate: handleNavigate,
           onDelete: handleDelete,
+          onPreload: handlePreload,
         },
       }))
     );
-  }, [currentSessionId, onNavigate, handleDelete, setNodes]);
+  }, [currentSessionId, handleNavigate, handleDelete, handlePreload, setNodes]);
 
   return (
     // Same container shape as GlassPane — seamless visual swap
@@ -359,7 +491,7 @@ export function VersionTree({
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            onNodesChange={onNodesChange}
+            onNodesChange={handleNodesChange}
             onEdgesChange={onEdgesChange}
             nodeTypes={nodeTypes}
             fitView
