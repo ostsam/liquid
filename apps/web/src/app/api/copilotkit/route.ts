@@ -3,22 +3,19 @@ import {
 	ExperimentalEmptyAdapter,
 	copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
-import { LangGraphAgent } from "@copilotkit/runtime/langgraph";
+import { LangGraphHttpAgent } from "@copilotkit/runtime/langgraph";
 import { NextRequest } from "next/server";
 
 // 1. You can use any service adapter here for multi-agent support. We use
 //    the empty adapter since we're only using one agent.
 const serviceAdapter = new ExperimentalEmptyAdapter();
 
-// 2. Create the CopilotRuntime instance and utilize the LangGraph AG-UI
-//    integration to setup the connection.
+// 2. Create the CopilotRuntime instance and connect to the FastAPI agent
+//    via the AG-UI HTTP protocol (no LangGraph Cloud dependency).
 const runtime = new CopilotRuntime({
 	agents: {
-		liquidAgent: new LangGraphAgent({
-			deploymentUrl:
-				process.env.LANGGRAPH_DEPLOYMENT_URL || "http://localhost:8123",
-			graphId: "liquidAgent",
-			langsmithApiKey: process.env.LANGSMITH_API_KEY || "",
+		liquidAgent: new LangGraphHttpAgent({
+			url: process.env.AGENT_URL || "http://localhost:8123",
 		}),
 	},
 });
