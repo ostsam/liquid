@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "npx @langchain/langgraph-cli dev --port 8123 --no-browser"
+    "dev": ".venv/bin/python main.py"
   },
   "keywords": [],
   "author": "",
