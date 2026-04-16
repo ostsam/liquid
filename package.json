@@ -9,14 +9,14 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
-    "test": "pnpm --filter web test"
+    "test": "bun --filter web test"
   },
   "devDependencies": {
     "eslint": "^9.39.1",
     "eslint-config-next": "^16.0.8",
     "turbo": "^2.3.3"
   },
-  "packageManager": "pnpm@9.15.0",
+  "packageManager": "bun@1.2.15",
   "engines": {
     "node": ">=18.0.0"
   }

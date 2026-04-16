@@ -35,7 +35,7 @@ Removed from the active architecture:
 ## Requirements
 
 - Node.js 18+
-- pnpm 9+
+- Bun 1.2+
 - `OPENAI_API_KEY`
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
@@ -50,19 +50,19 @@ Optional model overrides:
 Install dependencies:
 
 ```bash
-pnpm install
+bun install
 ```
 
 Run the app:
 
 ```bash
-pnpm dev
+bun dev
 ```
 
 Run the web app directly:
 
 ```bash
-pnpm --filter web dev
+bun --filter web dev
 ```
 
 ## Verification
@@ -70,13 +70,13 @@ pnpm --filter web dev
 Regression checks:
 
 ```bash
-pnpm --filter web test
+bun --filter web test
 ```
 
 Production build:
 
 ```bash
-pnpm --filter web exec next build --webpack
+bun --filter web exec next build --webpack
 ```
 
 ## Notes
