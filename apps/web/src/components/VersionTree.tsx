@@ -215,6 +215,7 @@ const nodeTypes: NodeTypes = {
 interface VersionTreeProps {
   rootSessionId: string;
   currentSessionId: string;
+  refreshKey?: number;
   onNavigate: (sessionId: string, cachedSession?: unknown) => void;
   onFork: () => void;
   onClose: () => void;
@@ -225,6 +226,7 @@ interface VersionTreeProps {
 export function VersionTree({
   rootSessionId,
   currentSessionId,
+  refreshKey = 0,
   onNavigate,
   onFork,
   onClose,
@@ -426,6 +428,27 @@ export function VersionTree({
       });
     return () => { cancelled = true; };
   }, [silentRefreshing, rootSessionId, buildGraph]);
+
+  useEffect(() => {
+    if (!rootSessionId || refreshKey === 0 || loading || silentRefreshing) {
+      return;
+    }
+
+    let cancelled = false;
+
+    fetch(`/api/tree/${rootSessionId}`)
+      .then((r) => r.json())
+      .then((sessions: SessionFlat[]) => {
+        if (!cancelled) {
+          buildGraph(sessions);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [buildGraph, loading, refreshKey, rootSessionId, silentRefreshing]);
 
   // Keep active-node highlight in sync without full re-fetch
   useEffect(() => {

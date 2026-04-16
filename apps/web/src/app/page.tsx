@@ -67,13 +67,14 @@ export default function LiquidPage() {
   const [isPending, setIsPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [treeRefreshKey, setTreeRefreshKey] = useState(0);
 
   const stateRef = useRef(state);
   const sessionIdRef = useRef("");
   const rootSessionIdRef = useRef("");
   const latestValuesRef = useRef<ActiveValues>({});
   const lastChangeRef = useRef<RewriteChange | null>(null);
-  const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prefetchingRef = useRef(false);
   const coordinatorRef = useRef<LiquidRequestCoordinator<RewritePayload, string> | null>(
     null,
@@ -195,6 +196,8 @@ export default function LiquidPage() {
         setErrorMessage(null);
         setReplayText(null);
         setRootSessionId(rootId);
+        setHistoryRefreshKey((value) => value + 1);
+        setTreeRefreshKey((value) => value + 1);
         setState((previous) => ({
           ...previous,
           outputText,
@@ -243,50 +246,6 @@ export default function LiquidPage() {
         setErrorMessage(error instanceof Error ? error.message : "Unable to load session");
       });
   }, []);
-
-  useEffect(() => {
-    if (phase !== "sculpting" || isPending) {
-      if (collaborationPollRef.current) {
-        clearInterval(collaborationPollRef.current);
-        collaborationPollRef.current = null;
-      }
-      return;
-    }
-
-    let lastUpdatedAt = 0;
-
-    collaborationPollRef.current = setInterval(async () => {
-      const sid = sessionIdRef.current;
-      if (!sid) {
-        return;
-      }
-
-      try {
-        const response = await fetch(`/api/session/${sid}`);
-        const remote = await parseJsonResponse<LiquidSessionSnapshot>(response);
-        const remoteTimestamp = Number(remote.updatedAt ?? 0);
-
-        if (remoteTimestamp <= lastUpdatedAt || !remote.outputText) {
-          return;
-        }
-
-        lastUpdatedAt = remoteTimestamp;
-        setState((previous) => ({
-          ...previous,
-          outputText: remote.outputText,
-        }));
-      } catch {
-        // Ignore transient collaboration polling failures.
-      }
-    }, 500);
-
-    return () => {
-      if (collaborationPollRef.current) {
-        clearInterval(collaborationPollRef.current);
-        collaborationPollRef.current = null;
-      }
-    };
-  }, [isPending, phase]);
 
   const runAnalyze = useCallback(
     async (inputText: string, sessionId: string, createdAt: string) => {
@@ -342,6 +301,8 @@ export default function LiquidPage() {
     setStreamingText("");
     setShowTree(false);
     setRootSessionId("");
+    setHistoryRefreshKey(0);
+    setTreeRefreshKey(0);
     setState(EMPTY_STATE);
     window.history.pushState({}, "", "/");
   }, []);
@@ -368,6 +329,8 @@ export default function LiquidPage() {
       setReplayText(null);
       setShowTree(false);
       setRootSessionId(sessionId);
+      setHistoryRefreshKey(0);
+      setTreeRefreshKey(0);
       setState({
         inputText: text,
         controls: null,
@@ -446,6 +409,7 @@ export default function LiquidPage() {
     rootSessionIdRef.current = rootId;
     setReplayText(null);
     setRootSessionId(rootId);
+    setTreeRefreshKey((value) => value + 1);
     setState((previous) => ({
       ...previous,
       sessionId,
@@ -570,6 +534,7 @@ export default function LiquidPage() {
               <VersionTree
                 rootSessionId={rootSessionIdRef.current || sessionIdRef.current}
                 currentSessionId={state.sessionId}
+                refreshKey={treeRefreshKey}
                 onNavigate={handleNavigateToSession}
                 onFork={handleFork}
                 onClose={() => setShowTree(false)}
@@ -587,6 +552,7 @@ export default function LiquidPage() {
                 {phase === "sculpting" && rootSessionIdRef.current && (
                   <ReplayBar
                     sessionId={rootSessionIdRef.current}
+                    refreshKey={historyRefreshKey}
                     onReplay={(snapshot) => setReplayText(snapshot)}
                     onExitReplay={() => setReplayText(null)}
                   />
