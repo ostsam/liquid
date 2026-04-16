@@ -12,17 +12,24 @@ interface HistoryEntry {
 
 interface ReplayBarProps {
   sessionId: string;
+  refreshKey?: number;
   onReplay: (outputSnapshot: string) => void;
   onExitReplay: () => void;
 }
 
-export function ReplayBar({ sessionId, onReplay, onExitReplay }: ReplayBarProps) {
+export function ReplayBar({
+  sessionId,
+  refreshKey = 0,
+  onReplay,
+  onExitReplay,
+}: ReplayBarProps) {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [position, setPosition] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (!sessionId) return;
+    setIsLoading(true);
 
     fetch(`/api/session/${sessionId}/history`)
       .then((r) => r.json())
@@ -31,7 +38,7 @@ export function ReplayBar({ sessionId, onReplay, onExitReplay }: ReplayBarProps)
         setIsLoading(false);
       })
       .catch(() => setIsLoading(false));
-  }, [sessionId]);
+  }, [refreshKey, sessionId]);
 
   const handleScrub = useCallback(
     (index: number) => {

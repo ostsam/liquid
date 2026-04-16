@@ -15,7 +15,7 @@ export function Dial({ id, label, description, value, onChange }: DialProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
-  // Sync parent-driven changes (session load, collaboration) only when idle.
+  // Sync parent-driven changes (session load, navigation) only when idle.
   useEffect(() => {
     if (!dragging.current) setLocalValue(value);
   }, [value]);
