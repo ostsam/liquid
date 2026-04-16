@@ -6,10 +6,17 @@ interface GlassPaneProps {
   phase: "empty" | "analyzing" | "sculpting";
   inputText: string;
   outputText: string;
+  isPending: boolean;
   onPaste: (text: string) => void;
 }
 
-export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPaneProps) {
+export function GlassPane({
+  phase,
+  inputText,
+  outputText,
+  isPending,
+  onPaste,
+}: GlassPaneProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const streamingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -37,7 +44,7 @@ export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPanePr
         <textarea
           ref={textareaRef}
           className="flex-1 resize-none bg-transparent px-5 py-5 text-white/80 placeholder-white/20 text-sm leading-relaxed font-mono focus:outline-none"
-          placeholder={"Paste anything here.\n\nAn email, a code snippet, a tweet, a breakup text.\nClaude will generate bespoke controls to sculpt it."}
+          placeholder={"Paste anything here.\n\nAn email, a code snippet, a tweet, a breakup text.\nGPT will generate bespoke controls to sculpt it."}
           onPaste={(e) => {
             const text = e.clipboardData.getData("text");
             if (text.trim()) {
@@ -100,7 +107,7 @@ export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPanePr
         <span className="text-xs font-mono text-white/30 uppercase tracking-widest">
           Output
         </span>
-        {!outputText && (
+        {isPending && (
           <span className="inline-flex gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce [animation-delay:0ms]" />
             <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce [animation-delay:150ms]" />
@@ -117,7 +124,9 @@ export function GlassPane({ phase, inputText, outputText, onPaste }: GlassPanePr
             )}
           </>
         ) : (
-          <span className="text-white/25 italic">Rewriting…</span>
+          <span className="text-white/25 italic">
+            {isPending ? "Rewriting…" : "No output yet."}
+          </span>
         )}
       </div>
       <div className="px-5 py-3 border-t border-white/[0.06]">

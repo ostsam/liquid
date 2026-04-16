@@ -1,100 +1,86 @@
-# CopilotKit <> LangGraph Starter
+# Liquid
 
-This is a starter template for building AI agents using [LangGraph](https://www.langchain.com/langgraph) and [CopilotKit](https://copilotkit.ai). It provides a modern Next.js application with an integrated LangGraph agent to be built on top of.
+Liquid is a single-app Next.js project that turns pasted text into a bespoke control surface.
+The app analyzes the input, generates text-specific sliders/toggles, and rewrites the text with GPT based on the current control state.
 
-This project is organized as a monorepo using [Turborepo](https://turbo.build) and [pnpm workspaces](https://pnpm.io/workspaces).
+## Architecture
 
-## Project Structure
+The repo is now web-only:
 
-```
-.
-├── apps/
-│   ├── web/          # Next.js frontend application
-│   └── agent/        # LangGraph agent
-├── pnpm-workspace.yaml
-├── turbo.json
-└── package.json
+```text
+apps/
+  web/   Next.js 16 app router app
 ```
 
-## Prerequisites
+Key runtime pieces:
+
+- `apps/web/src/app/page.tsx`
+  Plain React client state plus a single rewrite request coordinator
+- `apps/web/src/server/liquid/*`
+  GPT prompts, schema validation, OpenAI calls, and Redis-backed persistence helpers
+- `apps/web/src/app/api/analyze/route.ts`
+  Control-schema generation for pasted text
+- `apps/web/src/app/api/rewrite/route.ts`
+  Current-state rewrite generation only
+- `apps/web/src/app/api/session/[id]/*`
+  Session persistence, replay history, and version-tree APIs
+
+Removed from the active architecture:
+
+- CopilotKit
+- LangChain / LangGraph
+- Python agent server
+- speculative rewrite pre-generation
+
+## Requirements
 
 - Node.js 18+
-- [pnpm](https://pnpm.io/installation) 9.15.0 or later
-- OpenAI API Key (for the LangGraph agent)
+- pnpm 9+
+- `OPENAI_API_KEY`
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
 
-## Getting Started
+Optional model overrides:
 
-1. Install all dependencies (this installs everything for both apps):
+- `LIQUID_ANALYST_MODEL`
+- `LIQUID_REWRITER_MODEL`
+
+## Development
+
+Install dependencies:
+
 ```bash
 pnpm install
 ```
 
-2. Set up your OpenAI API key:
-```bash
-cd apps/agent
-echo "OPENAI_API_KEY=your-openai-api-key-here" > .env
-```
+Run the app:
 
-3. Start the development servers:
 ```bash
 pnpm dev
 ```
 
-This will start both the Next.js app (on port 3000) and the LangGraph agent (on port 8123) using Turborepo.
-
-## Available Scripts
-
-All scripts use Turborepo to run tasks across the monorepo:
-
-- `pnpm dev` - Starts both the web app and agent servers in development mode
-- `pnpm dev:studio` - Starts the web app and agent with LangGraph Studio UI
-- `pnpm build` - Builds all apps for production
-- `pnpm lint` - Runs linting across all apps
-
-### Running Scripts for Individual Apps
-
-You can also run scripts for individual apps using pnpm's filter flag:
+Run the web app directly:
 
 ```bash
-# Run dev for just the web app
 pnpm --filter web dev
-
-# Run dev for just the agent
-pnpm --filter agent dev
-
-# Or navigate to the app directory
-cd apps/web
-pnpm dev
 ```
 
-## Customization
+## Verification
 
-The main UI component is in `apps/web/src/app/page.tsx`. You can:
-- Modify the theme colors and styling
-- Add new frontend actions
-- Utilize shared-state
-- Customize your user-interface for interacting with LangGraph
+Regression checks:
 
-The LangGraph agent code is in `apps/agent/src/`.
+```bash
+pnpm --filter web test
+```
 
-## 📚 Documentation
+Production build:
 
-- [CopilotKit Documentation](https://docs.copilotkit.ai) - Explore CopilotKit's capabilities
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/) - Learn more about LangGraph and its features
-- [Next.js Documentation](https://nextjs.org/docs) - Learn about Next.js features and API
+```bash
+pnpm --filter web exec next build --webpack
+```
 
-## Contributing
+## Notes
 
-Feel free to submit issues and enhancement requests! This starter is designed to be easily extensible.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Troubleshooting
-
-### Agent Connection Issues
-If you see "I'm having trouble connecting to my tools", make sure:
-1. The LangGraph agent is running on port 8000
-2. Your OpenAI API key is set correctly
-3. Both servers started successfully
+- Rewrites are generated only for the currently requested control state.
+- Shared sessions and replay history are persisted in Upstash Redis.
+- The current route/test coverage protects the client coordinator invariants and the session/history persistence contract.

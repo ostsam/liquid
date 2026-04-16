@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 import { Dial } from "./Dial";
 import { Toggle } from "./Toggle";
 
@@ -29,11 +29,9 @@ interface ControlPanelProps {
   controls: ControlSchema;
   activeValues: ActiveValues;
   onValuesChange: (newValues: ActiveValues) => void;
-  /** Called after debounce — triggers the agent rewriter */
+  /** Called after every local change; debounce lives in the request coordinator */
   onTriggerAgent: () => void;
 }
-
-const DEBOUNCE_MS = 300;
 
 export function ControlPanel({
   controls,
@@ -41,38 +39,22 @@ export function ControlPanel({
   onValuesChange,
   onTriggerAgent,
 }: ControlPanelProps) {
-  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Fire the agent trigger after DEBOUNCE_MS of no input
-  const scheduleAgentTrigger = useCallback(() => {
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
-      onTriggerAgent();
-    }, DEBOUNCE_MS);
-  }, [onTriggerAgent]);
-
-  useEffect(() => {
-    return () => {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    };
-  }, []);
-
   const handleDialChange = useCallback(
     (id: string, value: number) => {
       const newValues = { ...activeValues, [id]: value };
       onValuesChange(newValues);
-      scheduleAgentTrigger();
+      onTriggerAgent();
     },
-    [activeValues, onValuesChange, scheduleAgentTrigger]
+    [activeValues, onTriggerAgent, onValuesChange]
   );
 
   const handleToggleChange = useCallback(
     (id: string, value: boolean) => {
       const newValues = { ...activeValues, [id]: value };
       onValuesChange(newValues);
-      scheduleAgentTrigger();
+      onTriggerAgent();
     },
-    [activeValues, onValuesChange, scheduleAgentTrigger]
+    [activeValues, onTriggerAgent, onValuesChange]
   );
 
   return (
