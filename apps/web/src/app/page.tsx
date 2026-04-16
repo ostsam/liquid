@@ -1,160 +1,251 @@
 "use client";
 
-import { useCoAgent, useCopilotChatInternal } from "@copilotkit/react-core";
 import { useCallback, useEffect, useRef, useState } from "react";
+
 import { GlassPane } from "@/components/GlassPane";
 import { ControlPanel } from "@/components/ControlPanel";
 import { ReplayBar } from "@/components/ReplayBar";
 import { VersionTree } from "@/components/VersionTree";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface ScalarControl {
-  id: string;
-  label: string;
-  description: string;
-  default: number;
-}
-
-interface ToggleControl {
-  id: string;
-  label: string;
-  description: string;
-  default: boolean;
-}
-
-interface ControlSchema {
-  scalars: ScalarControl[];
-  toggles: ToggleControl[];
-}
-
-type ActiveValues = Record<string, number | boolean>;
-
-interface LiquidAgentState {
-  inputText: string;
-  controls: ControlSchema | null;
-  activeValues: ActiveValues;
-  outputText: string;
-  sessionId: string;
-  skipRewrite?: boolean;
-}
+import {
+  buildCommittedRewriteArtifacts,
+  buildInitialSessionPayload,
+  buildSessionPayload,
+  hydrateClientState,
+  makeSessionId,
+} from "@/lib/liquid/session-model";
+import { LiquidRequestCoordinator } from "@/lib/liquid/request-coordinator";
+import type {
+  ActiveValues,
+  LiquidClientState,
+  LiquidSessionSnapshot,
+  RewriteChange,
+  RewritePayload,
+} from "@/lib/liquid/types";
 
 type Phase = "empty" | "analyzing" | "sculpting";
 
-function makeSessionId() {
-  return (
-    Math.random().toString(36).slice(2, 8) +
-    Math.random().toString(36).slice(2, 6)
-  );
+const EMPTY_STATE: LiquidClientState = {
+  inputText: "",
+  controls: null,
+  activeValues: {},
+  outputText: "",
+  sessionId: "",
+};
+
+function findChangedControl(
+  previousValues: ActiveValues,
+  nextValues: ActiveValues,
+): RewriteChange | null {
+  for (const [controlId, value] of Object.entries(nextValues)) {
+    if (previousValues[controlId] !== value) {
+      return {
+        controlId,
+        value,
+      };
+    }
+  }
+
+  return null;
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const payload = (await response.json()) as T & { error?: string };
+
+  if (!response.ok) {
+    throw new Error(payload.error ?? "Request failed");
+  }
+
+  return payload;
+}
 
 export default function LiquidPage() {
-  const { state, setState } = useCoAgent<LiquidAgentState>({
-    name: "liquidAgent",
-    initialState: {
-      inputText: "",
-      controls: null,
-      activeValues: {},
-      outputText: "",
-      sessionId: "",
-      skipRewrite: false,
-    },
-  });
-
-  const { agent } = useCopilotChatInternal();
-
-  const sessionIdRef = useRef<string>("");
-  const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const outputPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // True while the local agent is actively generating — suppresses collaboration polling
-  const isGeneratingRef = useRef<boolean>(false);
-
-  const [rootSessionId, setRootSessionId] = useState<string>("");
+  const [state, setState] = useState<LiquidClientState>(EMPTY_STATE);
+  const [rootSessionId, setRootSessionId] = useState("");
   const [replayText, setReplayText] = useState<string | null>(null);
   const [showTree, setShowTree] = useState(false);
-
-  // Pre-fetched tree data — populated on button hover so it's ready before mount
   const [prefetchedSessions, setPrefetchedSessions] = useState<unknown[] | null>(null);
-  const prefetchingRef = useRef(false);
+  const [isPending, setIsPending] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState("");
 
-  // Invalidate pre-fetched data whenever the active session changes (new rewrite = new node in tree)
+  const stateRef = useRef(state);
+  const sessionIdRef = useRef("");
+  const rootSessionIdRef = useRef("");
+  const latestValuesRef = useRef<ActiveValues>({});
+  const lastChangeRef = useRef<RewriteChange | null>(null);
+  const collaborationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prefetchingRef = useRef(false);
+  const coordinatorRef = useRef<LiquidRequestCoordinator<RewritePayload, string> | null>(
+    null,
+  );
+
+  useEffect(() => {
+    stateRef.current = state;
+    sessionIdRef.current = state.sessionId;
+    latestValuesRef.current = state.activeValues;
+  }, [state]);
+
+  useEffect(() => {
+    rootSessionIdRef.current = rootSessionId;
+  }, [rootSessionId]);
+
   useEffect(() => {
     setPrefetchedSessions(null);
     prefetchingRef.current = false;
   }, [state.sessionId]);
 
-  // Holds session fetched from URL — separate from CopilotKit state so we can
-  // reapply it if CopilotKit's backend sync overwrites our hydration.
-  type UrlSession = Partial<LiquidAgentState> & { rootSessionId?: string; _sid: string };
-  const [urlSession, setUrlSession] = useState<UrlSession | null>(null);
+  const persistSession = useCallback(
+    async (sessionId: string, body: ReturnType<typeof buildSessionPayload>) => {
+      await fetch(`/api/session/${sessionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    },
+    [],
+  );
 
-  // ── Derived phase ─────────────────────────────────────────────────────────
+  const persistHistory = useCallback(
+    async (
+      historySessionId: string,
+      body: ReturnType<typeof buildCommittedRewriteArtifacts>["historyEntry"],
+    ) => {
+      await fetch(`/api/session/${historySessionId}/history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    },
+    [],
+  );
+
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = new LiquidRequestCoordinator<RewritePayload, string>({
+      delayMs: 300,
+      execute: async (payload, context) => {
+        const response = await fetch("/api/rewrite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: context.signal,
+        });
+
+        if (!response.ok) {
+          let errorMsg = "Rewrite failed";
+          try {
+            const errBody = (await response.json()) as { error?: string };
+            errorMsg = errBody.error ?? errorMsg;
+          } catch {}
+          throw new Error(errorMsg);
+        }
+
+        if (!response.body) {
+          throw new Error("Response body is empty");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = "";
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          accumulated += decoder.decode(value, { stream: true });
+          context.onChunk(accumulated);
+        }
+
+        accumulated += decoder.decode();
+
+        if (!accumulated.trim()) {
+          throw new Error("Rewrite produced no output");
+        }
+
+        return accumulated.trim();
+      },
+      onPendingChange: setIsPending,
+      onChunk: (text) => {
+        setStreamingText(text);
+      },
+      onCommit: async (outputText) => {
+        setStreamingText("");
+        const current = stateRef.current;
+        if (!current.controls) {
+          return;
+        }
+
+        const rootId = rootSessionIdRef.current || current.sessionId;
+        const artifacts = buildCommittedRewriteArtifacts({
+          currentSessionId: current.sessionId,
+          rootSessionId: rootId,
+          inputText: current.inputText,
+          controls: current.controls,
+          activeValues: latestValuesRef.current,
+          outputText,
+          isInitialCommit: !current.outputText,
+          currentCreatedAt: current.createdAt,
+          change: lastChangeRef.current,
+        });
+
+        await persistSession(artifacts.nextSessionId, artifacts.sessionPayload);
+        await persistHistory(artifacts.historySessionId, artifacts.historyEntry);
+
+        sessionIdRef.current = artifacts.nextSessionId;
+        rootSessionIdRef.current = rootId;
+        lastChangeRef.current = null;
+        setErrorMessage(null);
+        setReplayText(null);
+        setRootSessionId(rootId);
+        setState((previous) => ({
+          ...previous,
+          outputText,
+          sessionId: artifacts.nextSessionId,
+          createdAt: artifacts.sessionPayload.createdAt,
+        }));
+        window.history.replaceState({}, "", `?session=${artifacts.nextSessionId}`);
+      },
+      onError: (error) => {
+        setStreamingText("");
+        setErrorMessage(error instanceof Error ? error.message : "Rewrite failed");
+      },
+    });
+  }
+
+  useEffect(() => {
+    return () => {
+      coordinatorRef.current?.dispose();
+    };
+  }, []);
 
   const phase: Phase = !state.inputText
     ? "empty"
     : !state.controls
-    ? "analyzing"
-    : "sculpting";
+      ? "analyzing"
+      : "sculpting";
 
-  // ── Reactive agent trigger ────────────────────────────────────────────────
-
-  const prevPhaseRef = useRef<Phase>("empty");
-  useEffect(() => {
-    if (phase === "analyzing" && prevPhaseRef.current !== "analyzing") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (agent as any)?.runAgent();
-    }
-    prevPhaseRef.current = phase;
-  }, [phase, agent]);
-
-  // ── Session hydration from URL ────────────────────────────────────────────
-  // Two-effect strategy:
-  //  1. Fetch eagerly on mount — no dependency on agent readiness.
-  //  2. Apply to CopilotKit state whenever the agent is ready AND the
-  //     CopilotKit state is still empty (guards against CopilotKit's own
-  //     backend-sync overwriting an earlier hydration attempt).
-
-  // Effect 1: fetch
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sid = params.get("session");
-    if (!sid) return;
+    if (!sid) {
+      return;
+    }
 
     fetch(`/api/session/${sid}`)
-      .then((r) => r.json())
-      .then((session: Partial<LiquidAgentState> & { rootSessionId?: string }) => {
-        if (session.inputText) {
-          setUrlSession({ ...session, _sid: sid });
-        }
+      .then((response) => parseJsonResponse<LiquidSessionSnapshot>(response))
+      .then((session) => {
+        const nextState = hydrateClientState(session, sid);
+        sessionIdRef.current = sid;
+        rootSessionIdRef.current = session.rootSessionId ?? sid;
+        latestValuesRef.current = nextState.activeValues;
+        setRootSessionId(session.rootSessionId ?? sid);
+        setState(nextState);
       })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      .catch((error) => {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to load session");
+      });
   }, []);
 
-  // Effect 2: apply once agent is ready and CopilotKit state is still empty
   useEffect(() => {
-    if (!urlSession || !agent || state.inputText) return;
-
-    const { _sid: sid, ...session } = urlSession;
-    sessionIdRef.current = sid;
-    setRootSessionId(session.rootSessionId ?? sid);
-    setState({
-      inputText: session.inputText ?? "",
-      controls: session.controls ?? null,
-      activeValues: session.activeValues ?? {},
-      outputText: session.outputText ?? "",
-      sessionId: sid,
-      skipRewrite: true, // don't re-run rewriter when restoring from URL
-    });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlSession, agent, state.inputText]);
-
-  // ── Collaboration polling ─────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (phase !== "sculpting") {
+    if (phase !== "sculpting" || isPending) {
       if (collaborationPollRef.current) {
         clearInterval(collaborationPollRef.current);
         collaborationPollRef.current = null;
@@ -162,34 +253,30 @@ export default function LiquidPage() {
       return;
     }
 
-    let lastSid = "";
     let lastUpdatedAt = 0;
 
     collaborationPollRef.current = setInterval(async () => {
-      const sid = sessionIdRef.current; // read fresh every tick — never stale
-      if (!sid) return;
-      if (sid !== lastSid) {
-        lastSid = sid;
-        lastUpdatedAt = 0; // reset timestamp when session changes
+      const sid = sessionIdRef.current;
+      if (!sid) {
+        return;
       }
+
       try {
-        const res = await fetch(`/api/session/${sid}`);
-        const remote = (await res.json()) as Partial<LiquidAgentState> & {
-          updatedAt?: string;
-        };
-        const remoteTs = Number(remote.updatedAt ?? 0);
-        if (!isGeneratingRef.current && remoteTs > lastUpdatedAt && remote.outputText) {
-          lastUpdatedAt = remoteTs;
-          setState((prev) => ({
-            inputText: prev?.inputText ?? "",
-            controls: prev?.controls ?? null,
-            activeValues: prev?.activeValues ?? {},
-            outputText: remote.outputText ?? prev?.outputText ?? "",
-            sessionId: prev?.sessionId ?? "",
-          }));
+        const response = await fetch(`/api/session/${sid}`);
+        const remote = await parseJsonResponse<LiquidSessionSnapshot>(response);
+        const remoteTimestamp = Number(remote.updatedAt ?? 0);
+
+        if (remoteTimestamp <= lastUpdatedAt || !remote.outputText) {
+          return;
         }
+
+        lastUpdatedAt = remoteTimestamp;
+        setState((previous) => ({
+          ...previous,
+          outputText: remote.outputText,
+        }));
       } catch {
-        // ignore
+        // Ignore transient collaboration polling failures.
       }
     }, 500);
 
@@ -199,217 +286,204 @@ export default function LiquidPage() {
         collaborationPollRef.current = null;
       }
     };
-  }, [phase, setState]);
+  }, [isPending, phase]);
 
-  // ── Frontend output persistence ───────────────────────────────────────────
-  // The Python agent may receive a stale sessionId (if React batches the setState
-  // before runAgent reads the updated state), so it can write outputText to the
-  // wrong session. This effect is the authoritative write: it runs on the frontend
-  // where sessionIdRef.current is always correct, 1s after outputText stabilises
-  // (i.e. streaming has finished). Skipped when skipRewrite=true (navigation view).
-
-  useEffect(() => {
-    if (!state.outputText || !sessionIdRef.current) return;
-    if (state.skipRewrite) return; // viewing a historical version — don't overwrite
-
-    const sid = sessionIdRef.current; // capture now, before any async gap
-    const text = state.outputText;    // capture now
-
-    if (outputPersistTimerRef.current) clearTimeout(outputPersistTimerRef.current);
-    outputPersistTimerRef.current = setTimeout(() => {
-      isGeneratingRef.current = false;
-      fetch(`/api/session/${sid}`, {
-        method: "PATCH",
+  const runAnalyze = useCallback(
+    async (inputText: string, sessionId: string, createdAt: string) => {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outputText: text }),
-      }).catch(() => {});
-    }, 1000);
-  }, [state.outputText, state.skipRewrite]);
+        body: JSON.stringify({ inputText }),
+      });
+      const result = await parseJsonResponse<{
+        controls: LiquidClientState["controls"];
+        activeValues: ActiveValues;
+      }>(response);
 
-  // ── Paste handler ─────────────────────────────────────────────────────────
+      latestValuesRef.current = result.activeValues;
+      setState((previous) => ({
+        ...previous,
+        controls: result.controls,
+        activeValues: result.activeValues,
+        outputText: "",
+        createdAt,
+      }));
+
+      await persistSession(
+        sessionId,
+        buildSessionPayload({
+          inputText,
+          controls: result.controls,
+          activeValues: result.activeValues,
+          outputText: "",
+          rootSessionId: sessionId,
+          parentSessionId: null,
+          createdAt,
+        }),
+      );
+
+      await coordinatorRef.current?.runNow({
+        inputText,
+        controls: result.controls!,
+        activeValues: result.activeValues,
+      });
+    },
+    [persistSession],
+  );
+
+  const resetToEmpty = useCallback(() => {
+    coordinatorRef.current?.cancel();
+    sessionIdRef.current = "";
+    rootSessionIdRef.current = "";
+    latestValuesRef.current = {};
+    lastChangeRef.current = null;
+    setErrorMessage(null);
+    setReplayText(null);
+    setStreamingText("");
+    setShowTree(false);
+    setRootSessionId("");
+    setState(EMPTY_STATE);
+    window.history.pushState({}, "", "/");
+  }, []);
 
   const handlePaste = useCallback(
     async (text: string) => {
-      // "New paste" button passes the current inputText back — treat as a reset
-      if (state.controls && text === state.inputText) {
-        sessionIdRef.current = "";
-        setRootSessionId("");
-        setReplayText(null);
-        setShowTree(false);
-        setUrlSession(null);
-        setState({ inputText: "", controls: null, activeValues: {}, outputText: "", sessionId: "", skipRewrite: false });
-        window.history.pushState({}, "", "/");
+      const current = stateRef.current;
+      if (current.controls && text === current.inputText) {
+        resetToEmpty();
         return;
       }
 
-      const sid = makeSessionId();
-      sessionIdRef.current = sid;
-      setRootSessionId(sid);
+      coordinatorRef.current?.cancel();
+
+      const sessionId = makeSessionId();
+      const createdAt = Date.now().toString();
+
+      sessionIdRef.current = sessionId;
+      rootSessionIdRef.current = sessionId;
+      latestValuesRef.current = {};
+      lastChangeRef.current = null;
+
+      setErrorMessage(null);
       setReplayText(null);
       setShowTree(false);
-
-      setUrlSession(null); // new paste supersedes any URL-loaded session
+      setRootSessionId(sessionId);
       setState({
         inputText: text,
         controls: null,
         activeValues: {},
         outputText: "",
-        sessionId: sid,
-        skipRewrite: false,
+        sessionId,
+        createdAt,
+      });
+      window.history.pushState({}, "", `?session=${sessionId}`);
+
+      await persistSession(sessionId, {
+        ...buildInitialSessionPayload(text),
+        rootSessionId: sessionId,
+        createdAt,
       });
 
-      window.history.pushState({}, "", `?session=${sid}`);
-
-      fetch(`/api/session/${sid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          inputText: text,
-          controls: null,
-          activeValues: {},
-          outputText: "",
-          rootSessionId: sid,
-          parentSessionId: null,
-          createdAt: Date.now().toString(),
-        }),
-      }).catch(() => {});
-    },
-    [setState]
-  );
-
-  // ── Control changes ───────────────────────────────────────────────────────
-
-  const handleValuesChange = useCallback(
-    (newValues: ActiveValues) => {
-      setState((prev) => ({
-        inputText: prev?.inputText ?? "",
-        controls: prev?.controls ?? null,
-        activeValues: newValues,
-        outputText: prev?.outputText ?? "",
-        sessionId: prev?.sessionId ?? "",
-      }));
-    },
-    [setState]
-  );
-
-  const handleTriggerAgent = useCallback(() => {
-    // Each user-triggered rewrite automatically becomes a new child version.
-    // Advance sessionId BEFORE calling runAgent() so the rewriter writes
-    // its output directly into the new child session, not the parent.
-    const parentSid = sessionIdRef.current;
-    if (parentSid) {
-      const rootId = rootSessionId || parentSid;
-      const childSid = makeSessionId();
-
-      sessionIdRef.current = childSid;
-      setUrlSession(null);
-
-      fetch(`/api/session/${childSid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          inputText: state.inputText,
-          controls: state.controls,
-          activeValues: state.activeValues,
-          outputText: "",
-          rootSessionId: rootId,
-          parentSessionId: parentSid,
-          createdAt: Date.now().toString(),
-        }),
-      }).catch(() => {});
-
-      setState((prev) => ({ ...prev, sessionId: childSid, skipRewrite: false } as LiquidAgentState));
-      window.history.replaceState({}, "", `?session=${childSid}`);
-    }
-
-    isGeneratingRef.current = true;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (agent as any)?.runAgent();
-  }, [agent, rootSessionId, state.inputText, state.controls, state.activeValues, setState]);
-
-  // ── Fork ──────────────────────────────────────────────────────────────────
-
-  const handleFork = useCallback(async () => {
-    const parentSid = sessionIdRef.current;
-    const rootId = rootSessionId || parentSid;
-    const newSid = makeSessionId();
-
-    await fetch(`/api/session/${newSid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        inputText: state.inputText,
-        controls: state.controls,
-        activeValues: state.activeValues,
-        outputText: state.outputText,
-        rootSessionId: rootId,
-        parentSessionId: parentSid,
-        createdAt: Date.now().toString(),
-      }),
-    }).catch(() => {});
-
-    sessionIdRef.current = newSid;
-    setRootSessionId(rootId);
-    setReplayText(null);
-    setUrlSession(null);
-
-    setState((prev) => ({
-      inputText: prev?.inputText ?? "",
-      controls: prev?.controls ?? null,
-      activeValues: prev?.activeValues ?? {},
-      outputText: prev?.outputText ?? "",
-      sessionId: newSid,
-      skipRewrite: false,
-    }));
-
-    window.history.pushState({}, "", `?session=${newSid}`);
-  }, [state, rootSessionId, setState]);
-
-  // ── Navigate to a session from the tree ──────────────────────────────────
-
-  const handleNavigateToSession = useCallback(
-    async (targetSessionId: string, cachedSession?: unknown) => {
       try {
-        const session = cachedSession
-          ? (cachedSession as Partial<LiquidAgentState> & { rootSessionId?: string })
-          : ((await fetch(`/api/session/${targetSessionId}`).then((r) =>
-              r.json()
-            )) as Partial<LiquidAgentState> & { rootSessionId?: string });
-        if (session.inputText) {
-          sessionIdRef.current = targetSessionId;
-          setRootSessionId(session.rootSessionId ?? targetSessionId);
-          setReplayText(null);
-          setShowTree(false); // zoom back in
-          setUrlSession(null); // navigating away from URL-loaded session
-          setState({
-            inputText: session.inputText ?? "",
-            controls: session.controls ?? null,
-            activeValues: session.activeValues ?? {},
-            outputText: session.outputText ?? "",
-            sessionId: targetSessionId,
-            skipRewrite: true, // display historical text without triggering rewriter
-          });
-          window.history.pushState({}, "", `?session=${targetSessionId}`);
-        }
-      } catch {
-        // ignore
+        await runAnalyze(text, sessionId, createdAt);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Analyze failed");
       }
     },
-    [setState]
+    [persistSession, resetToEmpty, runAnalyze],
   );
 
-  // ─────────────────────────────────────────────────────────────────────────
+  const handleValuesChange = useCallback((newValues: ActiveValues) => {
+    const change = findChangedControl(latestValuesRef.current, newValues);
+    if (change) {
+      lastChangeRef.current = change;
+    }
+
+    latestValuesRef.current = newValues;
+    setState((previous) => ({
+      ...previous,
+      activeValues: newValues,
+    }));
+  }, []);
+
+  const handleTriggerAgent = useCallback(() => {
+    const current = stateRef.current;
+    if (!current.controls) {
+      return;
+    }
+
+    coordinatorRef.current?.schedule({
+      inputText: current.inputText,
+      controls: current.controls,
+      activeValues: latestValuesRef.current,
+    });
+  }, []);
+
+  const handleFork = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current.sessionId) {
+      return;
+    }
+
+    const rootId = rootSessionIdRef.current || current.sessionId;
+    const sessionId = makeSessionId();
+    const createdAt = Date.now().toString();
+
+    await persistSession(
+      sessionId,
+      buildSessionPayload({
+        inputText: current.inputText,
+        controls: current.controls,
+        activeValues: current.activeValues,
+        outputText: current.outputText,
+        rootSessionId: rootId,
+        parentSessionId: current.sessionId,
+        createdAt,
+      }),
+    );
+
+    sessionIdRef.current = sessionId;
+    rootSessionIdRef.current = rootId;
+    setReplayText(null);
+    setRootSessionId(rootId);
+    setState((previous) => ({
+      ...previous,
+      sessionId,
+      createdAt,
+    }));
+    window.history.pushState({}, "", `?session=${sessionId}`);
+  }, [persistSession]);
+
+  const handleNavigateToSession = useCallback(async (targetSessionId: string) => {
+    try {
+      const response = await fetch(`/api/session/${targetSessionId}`);
+      const session = await parseJsonResponse<LiquidSessionSnapshot>(response);
+      const nextState = hydrateClientState(session, targetSessionId);
+
+      coordinatorRef.current?.cancel();
+      sessionIdRef.current = targetSessionId;
+      rootSessionIdRef.current = session.rootSessionId ?? targetSessionId;
+      latestValuesRef.current = nextState.activeValues;
+      lastChangeRef.current = null;
+      setReplayText(null);
+      setStreamingText("");
+      setShowTree(false);
+      setRootSessionId(session.rootSessionId ?? targetSessionId);
+      setState(nextState);
+      window.history.pushState({}, "", `?session=${targetSessionId}`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to load version");
+    }
+  }, []);
 
   return (
     <main className="min-h-screen bg-[#080810] relative overflow-hidden">
-      {/* Ambient glow */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full bg-violet-600/10 blur-3xl" />
         <div className="absolute -bottom-40 -right-40 w-96 h-96 rounded-full bg-indigo-600/10 blur-3xl" />
       </div>
 
       <div className="relative z-10 min-h-screen flex flex-col">
-        {/* Header */}
         <header className="px-8 py-6 flex items-center gap-3">
           <div className="w-2 h-2 rounded-full bg-violet-400" />
           <span className="text-sm font-mono text-white/40 tracking-widest uppercase">
@@ -418,17 +492,21 @@ export default function LiquidPage() {
 
           {phase === "sculpting" && sessionIdRef.current && (
             <div className="ml-auto flex items-center gap-4">
-              {/* Version tree icon */}
               <button
-                onClick={() => setShowTree((v) => !v)}
+                onClick={() => setShowTree((value) => !value)}
                 onMouseEnter={() => {
-                  const rootId = rootSessionId || sessionIdRef.current;
-                  if (!rootId || prefetchingRef.current || prefetchedSessions) return;
+                  const rootId = rootSessionIdRef.current || sessionIdRef.current;
+                  if (!rootId || prefetchingRef.current || prefetchedSessions) {
+                    return;
+                  }
+
                   prefetchingRef.current = true;
                   fetch(`/api/tree/${rootId}`)
-                    .then((r) => r.json())
+                    .then((response) => response.json())
                     .then((data) => setPrefetchedSessions(data))
-                    .catch(() => { prefetchingRef.current = false; });
+                    .catch(() => {
+                      prefetchingRef.current = false;
+                    });
                 }}
                 title="Version tree"
                 className={[
@@ -461,7 +539,14 @@ export default function LiquidPage() {
           )}
         </header>
 
-        {/* Main content */}
+        {errorMessage && (
+          <div className="px-8 pb-4">
+            <div className="rounded-xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-xs font-mono text-red-200/80">
+              {errorMessage}
+            </div>
+          </div>
+        )}
+
         <div
           className={[
             "flex-1 px-8 pb-8 transition-all duration-500",
@@ -475,7 +560,6 @@ export default function LiquidPage() {
               : undefined
           }
         >
-          {/* Left column: output panel ↔ version tree (same space, clean swap) */}
           <div
             className={[
               "flex flex-col gap-4",
@@ -483,9 +567,8 @@ export default function LiquidPage() {
             ].join(" ")}
           >
             {showTree && phase === "sculpting" ? (
-              // The output panel zooms out to become the version tree canvas
               <VersionTree
-                rootSessionId={rootSessionId || sessionIdRef.current}
+                rootSessionId={rootSessionIdRef.current || sessionIdRef.current}
                 currentSessionId={state.sessionId}
                 onNavigate={handleNavigateToSession}
                 onFork={handleFork}
@@ -497,12 +580,13 @@ export default function LiquidPage() {
                 <GlassPane
                   phase={phase}
                   inputText={state.inputText}
-                  outputText={replayText ?? state.outputText}
+                  outputText={replayText ?? (streamingText || state.outputText)}
+                  isPending={isPending}
                   onPaste={handlePaste}
                 />
-                {phase === "sculpting" && sessionIdRef.current && (
+                {phase === "sculpting" && rootSessionIdRef.current && (
                   <ReplayBar
-                    sessionId={sessionIdRef.current}
+                    sessionId={rootSessionIdRef.current}
                     onReplay={(snapshot) => setReplayText(snapshot)}
                     onExitReplay={() => setReplayText(null)}
                   />
@@ -511,7 +595,6 @@ export default function LiquidPage() {
             )}
           </div>
 
-          {/* Right: ControlPanel — stays visible even in tree mode */}
           {phase === "sculpting" && state.controls && (
             <div className="panel-slide-in sticky top-8">
               <ControlPanel

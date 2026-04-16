@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "../.test-dist",
+    "rootDir": "..",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "incremental": false
+  },
+  "include": [
+    "../test/liquid-regression.ts",
+    "../src/lib/liquid/**/*.ts",
+    "../src/server/liquid/**/*.ts"
+  ]
+}

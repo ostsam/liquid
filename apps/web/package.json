@@ -4,14 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "tsc -p test/tsconfig.json && node test/fix-test-imports.mjs && node .test-dist/test/liquid-regression.js"
   },
   "dependencies": {
-    "@copilotkit/react-core": "1.51.4",
-    "@copilotkit/react-ui": "1.51.4",
-    "@copilotkit/runtime": "1.51.4",
     "@upstash/redis": "^1.36.2",
     "@xyflow/react": "^12.10.1",
     "next": "16.0.8",

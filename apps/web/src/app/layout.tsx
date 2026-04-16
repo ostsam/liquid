@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 
-import { CopilotKit } from "@copilotkit/react-core";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,11 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased">
-        <CopilotKit runtimeUrl="/api/copilotkit" agent="liquidAgent">
-          {children}
-        </CopilotKit>
-      </body>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
