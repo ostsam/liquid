@@ -399,11 +399,52 @@ async function testHydrationAndHistoryArtifacts() {
   assert.equal(child.historyEntry.controlId, "blame_assignment");
 }
 
+async function testSupersededStreamDuringDebounce() {
+  const chunks: string[] = [];
+  const commits: string[] = [];
+  const pending: boolean[] = [];
+  let oldSignal: AbortSignal | undefined;
+  let emitOldChunk: ((chunk: string) => void) | undefined;
+  let finishOld: ((result: string) => void) | undefined;
+  const coordinator = new LiquidRequestCoordinator<string, string>({
+    delayMs: 25,
+    execute: (payload, context) => {
+      if (payload === "old") {
+        oldSignal = context.signal;
+        emitOldChunk = context.onChunk;
+        // Deliberately ignore abort to exercise stale completion protection.
+        return new Promise((resolve) => { finishOld = resolve; });
+      }
+      context.onChunk(payload);
+      return Promise.resolve(payload);
+    },
+    onChunk: (chunk) => { chunks.push(chunk); },
+    onPendingChange: (value) => { pending.push(value); },
+    onCommit: (result) => { commits.push(result); },
+  });
+
+  const oldRequest = coordinator.runNow("old");
+  coordinator.schedule("latest");
+  assert.equal(oldSignal?.aborted, true);
+  emitOldChunk?.("stale prefix");
+  finishOld?.("stale result");
+  await oldRequest;
+  assert.deepEqual(chunks, []);
+  assert.deepEqual(commits, []);
+  assert.equal(pending.at(-1), true);
+  await sleep(60);
+  assert.deepEqual(chunks, ["latest"]);
+  assert.deepEqual(commits, ["latest"]);
+  assert.equal(pending.at(-1), false);
+  coordinator.dispose();
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
   ["schema validation", testSchemaValidation],
   ["analyst retry", testAnalystRetry],
   ["rewrite prompt shaping", testRewritePromptShaping],
   ["request coordinator semantics", testRequestCoordinatorSemantics],
+  ["superseded stream during debounce", testSupersededStreamDuringDebounce],
   ["hydration and history artifacts", testHydrationAndHistoryArtifacts],
 ];
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { memo, useCallback } from "react";
 import { Dial } from "./Dial";
 import { Toggle } from "./Toggle";
 
@@ -33,7 +33,7 @@ interface ControlPanelProps {
   onTriggerAgent: () => void;
 }
 
-export function ControlPanel({
+export const ControlPanel = memo(function ControlPanel({
   controls,
   activeValues,
   onValuesChange,
@@ -125,4 +125,4 @@ export function ControlPanel({
       )}
     </div>
   );
-}
+});
