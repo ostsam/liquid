@@ -469,7 +469,7 @@ export function VersionTree({
   return (
     // Same container shape as GlassPane — seamless visual swap
     // h-[70vh] gives React Flow a concrete height to render into
-    <div className="flex flex-col rounded-2xl bg-white/[0.04] border border-white/10 backdrop-blur-xl overflow-hidden" style={{ height: "70vh" }}>
+    <div className="workspace-pane flex flex-col rounded-2xl bg-white/[0.04] border border-white/10 backdrop-blur-xl overflow-hidden">
       {/* Header — mirrors GlassPane's header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2.5">

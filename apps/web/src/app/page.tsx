@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 
 import { GlassPane } from "@/components/GlassPane";
 import { ControlPanel } from "@/components/ControlPanel";
 import { ReplayBar } from "@/components/ReplayBar";
-import { VersionTree } from "@/components/VersionTree";
 import {
   buildCommittedRewriteArtifacts,
   buildInitialSessionPayload,
@@ -31,6 +31,15 @@ const EMPTY_STATE: LiquidClientState = {
   outputText: "",
   sessionId: "",
 };
+
+const VersionTree = dynamic(
+  () => import("@/components/VersionTree").then((module) => module.VersionTree),
+  {
+    loading: () => (
+      <div className="workspace-pane rounded-2xl bg-white/[0.04] border border-white/10" />
+    ),
+  },
+);
 
 function findChangedControl(
   previousValues: ActiveValues,
@@ -97,11 +106,12 @@ export default function LiquidPage() {
 
   const persistSession = useCallback(
     async (sessionId: string, body: ReturnType<typeof buildSessionPayload>) => {
-      await fetch(`/api/session/${sessionId}`, {
+      const response = await fetch(`/api/session/${sessionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      await parseJsonResponse<{ ok: boolean }>(response);
     },
     [],
   );
@@ -111,11 +121,12 @@ export default function LiquidPage() {
       historySessionId: string,
       body: ReturnType<typeof buildCommittedRewriteArtifacts>["historyEntry"],
     ) => {
-      await fetch(`/api/session/${historySessionId}/history`, {
+      const response = await fetch(`/api/session/${historySessionId}/history`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      await parseJsonResponse<{ ok: boolean }>(response);
     },
     [],
   );
@@ -167,8 +178,7 @@ export default function LiquidPage() {
       onChunk: (text) => {
         setStreamingText(text);
       },
-      onCommit: async (outputText) => {
-        setStreamingText("");
+      onCommit: async (outputText, requestId) => {
         const current = stateRef.current;
         if (!current.controls) {
           return;
@@ -187,24 +197,31 @@ export default function LiquidPage() {
           change: lastChangeRef.current,
         });
 
-        await persistSession(artifacts.nextSessionId, artifacts.sessionPayload);
-        await persistHistory(artifacts.historySessionId, artifacts.historyEntry);
-
         sessionIdRef.current = artifacts.nextSessionId;
         rootSessionIdRef.current = rootId;
         lastChangeRef.current = null;
+        setStreamingText("");
         setErrorMessage(null);
         setReplayText(null);
         setRootSessionId(rootId);
-        setHistoryRefreshKey((value) => value + 1);
-        setTreeRefreshKey((value) => value + 1);
-        setState((previous) => ({
-          ...previous,
+        const nextState = {
+          ...current,
+          activeValues: latestValuesRef.current,
           outputText,
           sessionId: artifacts.nextSessionId,
           createdAt: artifacts.sessionPayload.createdAt,
-        }));
+        };
+        stateRef.current = nextState;
+        setState(nextState);
         window.history.replaceState({}, "", `?session=${artifacts.nextSessionId}`);
+
+        await Promise.all([
+          persistSession(artifacts.nextSessionId, artifacts.sessionPayload),
+          persistHistory(artifacts.historySessionId, artifacts.historyEntry),
+        ]);
+        if (!coordinatorRef.current?.isCurrent(requestId)) return;
+        setHistoryRefreshKey((value) => value + 1);
+        setTreeRefreshKey((value) => value + 1);
       },
       onError: (error) => {
         setStreamingText("");
@@ -248,7 +265,7 @@ export default function LiquidPage() {
   }, []);
 
   const runAnalyze = useCallback(
-    async (inputText: string, sessionId: string, createdAt: string) => {
+    async (inputText: string, sessionId: string, createdAt: string, initialSave: Promise<void>) => {
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -259,6 +276,7 @@ export default function LiquidPage() {
         activeValues: ActiveValues;
       }>(response);
 
+      if (sessionIdRef.current !== sessionId) return;
       latestValuesRef.current = result.activeValues;
       setState((previous) => ({
         ...previous,
@@ -268,18 +286,13 @@ export default function LiquidPage() {
         createdAt,
       }));
 
-      await persistSession(
-        sessionId,
-        buildSessionPayload({
-          inputText,
-          controls: result.controls,
-          activeValues: result.activeValues,
-          outputText: "",
-          rootSessionId: sessionId,
-          parentSessionId: null,
-          createdAt,
-        }),
-      );
+      // Analysis runs alongside the initial save. Its completed rewrite saves
+      // the controls too, avoiding an extra serial write before generation.
+      await initialSave;
+      if (sessionIdRef.current !== sessionId) return;
+      // A control change may already have scheduled a more recent rewrite
+      // while the initial save was finishing.
+      if (lastChangeRef.current) return;
 
       await coordinatorRef.current?.runNow({
         inputText,
@@ -287,7 +300,7 @@ export default function LiquidPage() {
         activeValues: result.activeValues,
       });
     },
-    [persistSession],
+    [],
   );
 
   const resetToEmpty = useCallback(() => {
@@ -327,6 +340,7 @@ export default function LiquidPage() {
 
       setErrorMessage(null);
       setReplayText(null);
+      setStreamingText("");
       setShowTree(false);
       setRootSessionId(sessionId);
       setHistoryRefreshKey(0);
@@ -341,14 +355,14 @@ export default function LiquidPage() {
       });
       window.history.pushState({}, "", `?session=${sessionId}`);
 
-      await persistSession(sessionId, {
+      const initialSave = persistSession(sessionId, {
         ...buildInitialSessionPayload(text),
         rootSessionId: sessionId,
         createdAt,
       });
 
       try {
-        await runAnalyze(text, sessionId, createdAt);
+        await Promise.all([initialSave, runAnalyze(text, sessionId, createdAt, initialSave)]);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Analyze failed");
       }
@@ -418,10 +432,12 @@ export default function LiquidPage() {
     window.history.pushState({}, "", `?session=${sessionId}`);
   }, [persistSession]);
 
-  const handleNavigateToSession = useCallback(async (targetSessionId: string) => {
+  const handleNavigateToSession = useCallback(async (targetSessionId: string, cachedSession?: unknown) => {
     try {
-      const response = await fetch(`/api/session/${targetSessionId}`);
-      const session = await parseJsonResponse<LiquidSessionSnapshot>(response);
+      const session = cachedSession
+        ? cachedSession as LiquidSessionSnapshot
+        : await fetch(`/api/session/${targetSessionId}`)
+            .then((response) => parseJsonResponse<LiquidSessionSnapshot>(response));
       const nextState = hydrateClientState(session, targetSessionId);
 
       coordinatorRef.current?.cancel();
@@ -513,20 +529,15 @@ export default function LiquidPage() {
 
         <div
           className={[
-            "flex-1 px-8 pb-8 transition-all duration-500",
+            "flex-1 px-4 sm:px-8 pb-8",
             phase === "sculpting"
-              ? "grid gap-6 items-start"
+              ? "grid gap-6 items-start lg:grid-cols-[minmax(0,1fr)_380px]"
               : "flex items-center justify-center",
           ].join(" ")}
-          style={
-            phase === "sculpting"
-              ? { gridTemplateColumns: "1fr 380px" }
-              : undefined
-          }
         >
           <div
             className={[
-              "flex flex-col gap-4",
+              "min-w-0 flex flex-col gap-4",
               phase !== "sculpting" ? "w-full max-w-2xl" : "",
             ].join(" ")}
           >
@@ -551,6 +562,7 @@ export default function LiquidPage() {
                 />
                 {phase === "sculpting" && rootSessionIdRef.current && (
                   <ReplayBar
+                    key={rootSessionIdRef.current}
                     sessionId={rootSessionIdRef.current}
                     refreshKey={historyRefreshKey}
                     onReplay={(snapshot) => setReplayText(snapshot)}

@@ -19,6 +19,23 @@ html {
   height: 100%;
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
+/* Output length changes scroll inside the workspace, never resize it. */
+.workspace-pane {
+  height: max(24rem, 60svh);
+  min-height: 0;
+}
+
+.workspace-text {
+  min-height: 0;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
+
 /* ── Glass-shatter entrance animation ────────────────────────────────────── */
 
 @keyframes shatter-in {
@@ -40,8 +57,7 @@ html {
 }
 
 .control-panel-enter {
-  opacity: 0;
-  animation: shatter-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: shatter-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 /* ── Panel slide-in from right ───────────────────────────────────────────── */
@@ -84,4 +100,11 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

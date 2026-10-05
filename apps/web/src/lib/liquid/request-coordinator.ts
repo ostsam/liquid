@@ -47,12 +47,13 @@ export class LiquidRequestCoordinator<TPayload, TResult = string> {
   }
 
   schedule(payload: TPayload) {
-    if (this.timer) {
-      clearTimeout(this.timer);
-    }
+    // Invalidate immediately, including the debounce window. An older stream
+    // must never commit after the user has selected newer values.
+    this.cancel();
 
     this.onPendingChange?.(true);
     this.timer = setTimeout(() => {
+      this.timer = null;
       void this.start(payload);
     }, this.delayMs);
   }
@@ -67,6 +68,7 @@ export class LiquidRequestCoordinator<TPayload, TResult = string> {
   }
 
   cancel() {
+    this.latestRequestId = ++this.nextRequestId;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -82,6 +84,10 @@ export class LiquidRequestCoordinator<TPayload, TResult = string> {
 
   dispose() {
     this.cancel();
+  }
+
+  isCurrent(requestId: number) {
+    return this.latestRequestId === requestId;
   }
 
   private async start(payload: TPayload) {
