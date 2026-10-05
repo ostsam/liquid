@@ -1,5 +1,7 @@
 import type { ActiveValues, ControlSchema } from "../../lib/liquid/types";
 
+export const AI_MODEL= "gpt-6-luna";
+
 export const ANALYST_SYSTEM_PROMPT = `You are a latent variable extractor. Your job is to decompose the provided text into its hidden control dimensions — the underlying axes of variation that, if altered, would meaningfully transform the text.
 
 Output ONLY valid JSON that matches the provided schema.
